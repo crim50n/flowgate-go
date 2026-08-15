@@ -9,7 +9,9 @@ permissions:
   contents: read
 
 env:
-  GO_VERSION: "1.25.6"
+  GO_VERSION: "1.25.13"
+  GOVULNCHECK_VERSION: "v1.7.0"
+  STATICCHECK_VERSION: "v0.7.0"
   UPX_VERSION: "5.1.1"
   UPX_SHA256: "1ff660454227861e00772f743f66b900072116b9dc24f6ee28b97cce88a7828a"
 
@@ -22,21 +24,109 @@ jobs:
         with:
           go-version: ${{ env.GO_VERSION }}
           cache: true
+      - name: Validate release metadata
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          version="${GITHUB_REF#refs/tags/v}"
+          printf '%s\n' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([+-][0-9A-Za-z.-]+)?$'
+          test -s "release-notes/${version}.md"
       - run: go test ./...
+      - run: go test -race ./...
       - run: go vet ./...
+      - name: Static analysis
+        run: |
+          go install honnef.co/go/tools/cmd/staticcheck@${STATICCHECK_VERSION}
+          staticcheck ./...
+      - name: Vulnerability scan
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@${GOVULNCHECK_VERSION}
+          govulncheck ./...
 
-  build:
+  integration:
     needs: test
     runs-on: ubuntu-24.04
-    strategy:
-      matrix:
-        goarch: [amd64, arm64]
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version: ${{ env.GO_VERSION }}
           cache: true
+      - name: Build integration test binary
+        run: CGO_ENABLED=0 go test -c -o /tmp/flowgate-go.test .
+      - name: Build and start runtime image
+        run: |
+          version=dev
+          case "$GITHUB_REF" in refs/tags/v*) version="${GITHUB_REF#refs/tags/v}" ;; esac
+          docker build --build-arg VERSION="$version" -t flowgate-integration .
+          docker run -d --name flowgate-integration \
+            -e PROXY_IP=203.0.113.10 flowgate-integration
+          for i in $(seq 1 30); do
+            status=$(docker exec flowgate-integration flowgate status 2>/dev/null || true)
+            active=$(printf '%s\n' "$status" | grep -c 'ACTIVE' || true)
+            if [ "$active" -ge 2 ] && ! printf '%s\n' "$status" | grep -q 'INACTIVE'; then
+              exit 0
+            fi
+            sleep 1
+          done
+          docker logs flowgate-integration
+          exit 1
+      - name: Run runtime integration tests
+        run: |
+          docker cp /tmp/flowgate-go.test flowgate-integration:/tmp/flowgate-go.test
+          docker exec -e FLOWGATE_INTEGRATION=1 flowgate-integration \
+            /tmp/flowgate-go.test -test.run \
+            '^(TestValidateAngieCandidateDoesNotTouchProduction|TestRestoreRuntimeWithNoInitSupervisor)$' -test.v
+          docker exec flowgate-integration angie -t
+          docker exec flowgate-integration blocky --config /etc/blocky/config.yml validate
+      - name: Verify concurrent CLI serialization
+        run: |
+          docker exec flowgate-integration flowgate add race-a.example.com >/tmp/race-a.log 2>&1 & p1=$!
+          docker exec flowgate-integration flowgate add race-b.example.com >/tmp/race-b.log 2>&1 & p2=$!
+          wait "$p1"
+          wait "$p2"
+          docker exec flowgate-integration grep -q 'race-a.example.com:' /etc/flowgate/flowgate.yaml
+          docker exec flowgate-integration grep -q 'race-b.example.com:' /etc/flowgate/flowgate.yaml
+      - name: Verify DNS TLS bootstrap
+        run: |
+          docker exec flowgate-integration flowgate dns dns.example.com
+          if docker exec flowgate-integration grep -Eq '^[[:space:]]+https: 8443$' /etc/blocky/config.yml; then
+            echo 'Blocky HTTPS enabled before a certificate exists' >&2
+            exit 1
+          fi
+          docker exec flowgate-integration sh -c '
+            mkdir -p /var/lib/angie/acme/acme_dns_example_com &&
+            cp /etc/ssl/certs/ssl-cert-snakeoil.pem /var/lib/angie/acme/acme_dns_example_com/certificate.pem &&
+            cp /etc/ssl/private/ssl-cert-snakeoil.key /var/lib/angie/acme/acme_dns_example_com/private.key'
+          docker exec flowgate-integration flowgate sync
+          docker exec flowgate-integration grep -Eq '^[[:space:]]+https: 8443$' /etc/blocky/config.yml
+          docker exec flowgate-integration grep -Eq '^[[:space:]]+tls: 853$' /etc/blocky/config.yml
+          docker exec flowgate-integration su-exec blocky test -r /var/lib/angie/acme/acme_dns_example_com/certificate.pem
+          docker exec flowgate-integration su-exec blocky test -r /var/lib/angie/acme/acme_dns_example_com/private.key
+          status=$(docker exec flowgate-integration flowgate status)
+          active=$(printf '%s\n' "$status" | grep -c 'ACTIVE' || true)
+          [ "$active" -ge 2 ]
+          ! printf '%s\n' "$status" | grep -q 'INACTIVE'
+      - name: Cleanup runtime
+        if: always()
+        run: docker rm -f flowgate-integration >/dev/null 2>&1 || true
+
+  build:
+    needs: [test, integration]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      - name: Resolve version
+        id: version
+        run: |
+          version=dev
+          case "$GITHUB_REF" in refs/tags/v*) version="${GITHUB_REF#refs/tags/v}" ;; esac
+          echo "version=$version" >> "$GITHUB_OUTPUT"
 
       - name: Install UPX
         run: |
@@ -47,34 +137,42 @@ jobs:
           tar -xJf /tmp/upx.tar.xz -C /tmp/upx --strip-components=1
           echo "/tmp/upx" >> "$GITHUB_PATH"
 
-      - name: Build minimal binary
-        env:
-          GOARCH: ${{ matrix.goarch }}
+      - name: Build release binaries
         run: |
           set -eu
           mkdir -p dist
-          name="flowgate-linux-${GOARCH}"
-          CGO_ENABLED=0 GOOS=linux GOARCH="$GOARCH" \
-            go build \
-              -trimpath \
-              -buildvcs=false \
-              -gcflags='all=-l' \
-              -ldflags='-s -w -buildid=' \
-              -o "dist/${name}" .
-          chmod 0755 "dist/${name}"
-          upx --best --lzma "dist/${name}"
-          upx -t "dist/${name}"
-          sha256sum "dist/${name}" > "dist/${name}.sha256"
-          if [ "$GOARCH" = amd64 ]; then
-            "dist/${name}" --help >/dev/null
-          fi
-          stat -c '%n %s bytes' "dist/${name}"
+          version="${{ steps.version.outputs.version }}"
+          for arch in amd64 arm64; do
+            name="flowgate-${version}-linux-${arch}"
+            CGO_ENABLED=0 GOOS=linux GOARCH="$arch" \
+              go build \
+                -trimpath \
+                -buildvcs=false \
+                -gcflags='all=-l' \
+                -ldflags="-s -w -buildid= -X main.version=${version}" \
+                -o "dist/${name}" .
+            chmod 0755 "dist/${name}"
+            upx --best --lzma "dist/${name}"
+            upx -t "dist/${name}"
+            (cd dist && sha256sum "${name}" > "${name}.sha256")
+            stat -c '%n %s bytes' "dist/${name}"
+          done
+          "dist/flowgate-${version}-linux-amd64" version | grep -Fx "Flowgate ${version}"
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: flowgate-linux-${{ matrix.goarch }}
-          path: |
-            dist/flowgate-linux-${{ matrix.goarch }}
-            dist/flowgate-linux-${{ matrix.goarch }}.sha256
+          name: flowgate-${{ steps.version.outputs.version }}-linux
+          path: dist/*
           if-no-files-found: error
           compression-level: 0
+
+      - name: Create GitHub release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="${{ steps.version.outputs.version }}"
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --verify-tag \
+            --title "Flowgate ${version}" \
+            --notes-file "release-notes/${version}.md"

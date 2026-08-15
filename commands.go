@@ -30,49 +30,103 @@ func cmdInit() error {
 	}
 	header("Initialization Complete")
 	fmt.Println("Next steps:")
-	fmt.Println("  flowgate dns dns.example.com")
+	fmt.Println("  flowgate add category-dev")
 	fmt.Println("  flowgate add example.com")
 	fmt.Println("  flowgate service app.example.com 8080")
+	fmt.Println("  flowgate dns dns.example.com")
 	fmt.Println("  flowgate status")
 	return nil
 }
 
-func cmdAdd(domains []string) error {
-	if len(domains) == 0 {
-		return fmt.Errorf("add requires at least one domain")
+func applyConfig(cfg *Config) error {
+	snap, err := snapshotFile(getPaths().ConfigFile)
+	if err != nil {
+		return err
+	}
+	if err := saveConfig(cfg); err != nil {
+		return err
+	}
+	if err := syncAll(); err != nil {
+		_ = restoreSnapshot(snap)
+		return err
+	}
+	return nil
+}
+
+func cmdAdd(targets []string) error {
+	if len(targets) == 0 {
+		return fmt.Errorf("add requires at least one domain or geosite")
 	}
 	cfg, err := loadConfig()
 	if err != nil {
 		return err
 	}
 	changed := false
-	for _, domain := range domains {
-		if !validDomain(domain) {
-			warn("Invalid domain format: %s", domain)
+	var db *GeoSiteDB
+	for _, target := range targets {
+		explicitGeoSite := len(target) >= 8 && strings.EqualFold(target[:8], "geosite:")
+		if validDomain(target) && !explicitGeoSite {
+			domain := strings.ToLower(target)
+			if _, exists := cfg.Domains[domain]; exists {
+				warn("Exists: %s", domain)
+				continue
+			}
+			cfg.Domains[domain] = Domain{Type: "proxy"}
+			success("Added proxy: %s", domain)
+			changed = true
 			continue
 		}
-		if _, exists := cfg.Domains[domain]; exists {
-			warn("Exists: %s", domain)
+
+		selector := normalizeGeoSiteName(target)
+		if !validGeoSiteName(selector) {
+			warn("Invalid domain or geosite: %s", target)
 			continue
 		}
-		cfg.Domains[domain] = Domain{Type: "proxy"}
-		success("Added proxy: %s", domain)
+		if geoSiteIndex(cfg.GeoSites, selector) >= 0 {
+			warn("Exists: %s", selector)
+			continue
+		}
+		if db == nil {
+			required := append([]string{}, cfg.GeoSites...)
+			required = append(required, selector)
+			if err := ensureDLCFor(required); err != nil {
+				return err
+			}
+			db, err = loadGeoSiteDB(getPaths().DLC)
+			if err != nil {
+				return err
+			}
+		}
+		if _, ok := db.Rules(selector); !ok {
+			warn("GeoSite not found: %s", selector)
+			continue
+		}
+		cfg.GeoSites = append(cfg.GeoSites, selector)
+		sort.Strings(cfg.GeoSites)
+		success("Added GeoSite: %s", selector)
 		changed = true
 	}
 	if !changed {
 		return nil
 	}
-	if err := saveConfig(cfg); err != nil {
-		return err
+	return applyConfig(cfg)
+}
+
+func geoSiteIndex(items []string, name string) int {
+	name = normalizeGeoSiteName(name)
+	for i, item := range items {
+		if normalizeGeoSiteName(item) == name {
+			return i
+		}
 	}
-	return syncAll()
+	return -1
 }
 
 func cmdService(args []string) error {
 	if len(args) < 2 {
 		return fmt.Errorf("service requires DOMAIN PORT [--ip IP]")
 	}
-	domain := args[0]
+	domain := strings.ToLower(args[0])
 	port, err := strconv.Atoi(args[1])
 	if err != nil || !validPort(port) {
 		return fmt.Errorf("invalid port: %s", args[1])
@@ -90,10 +144,7 @@ func cmdService(args []string) error {
 	}
 	cfg.Domains[domain] = Domain{Type: "service", IP: ip, Port: port}
 	success("Set service: %s -> %s:%d", domain, ip, port)
-	if err := saveConfig(cfg); err != nil {
-		return err
-	}
-	return syncAll()
+	return applyConfig(cfg)
 }
 
 func parseServiceIP(args []string) (string, error) {
@@ -122,7 +173,7 @@ func cmdDNS(args []string) error {
 	if len(args) != 1 {
 		return fmt.Errorf("dns requires exactly one domain")
 	}
-	domain := args[0]
+	domain := strings.ToLower(args[0])
 	if !validDomain(domain) {
 		return fmt.Errorf("invalid domain format: %s", domain)
 	}
@@ -137,40 +188,76 @@ func cmdDNS(args []string) error {
 	}
 	cfg.Settings.DNSDomain = domain
 	success("Primary DNS domain set to: %s", domain)
-	if err := saveConfig(cfg); err != nil {
-		return err
-	}
-	return syncAll()
+	return applyConfig(cfg)
 }
 
-func cmdRemove(domains []string) error {
-	if len(domains) == 0 {
-		return fmt.Errorf("remove requires at least one domain")
+func cmdRemove(targets []string) error {
+	if len(targets) == 0 {
+		return fmt.Errorf("remove requires at least one domain or geosite")
 	}
 	cfg, err := loadConfig()
 	if err != nil {
 		return err
 	}
 	changed := false
-	for _, domain := range domains {
-		if _, exists := cfg.Domains[domain]; !exists {
-			warn("Not found: %s", domain)
+	for _, target := range targets {
+		domain := strings.ToLower(target)
+		if _, exists := cfg.Domains[domain]; exists {
+			delete(cfg.Domains, domain)
+			if cfg.Settings.DNSDomain == domain {
+				cfg.Settings.DNSDomain = ""
+			}
+			success("Removed: %s", domain)
+			changed = true
 			continue
 		}
-		delete(cfg.Domains, domain)
-		if cfg.Settings.DNSDomain == domain {
-			cfg.Settings.DNSDomain = ""
+		selector := normalizeGeoSiteName(target)
+		if idx := geoSiteIndex(cfg.GeoSites, selector); idx >= 0 {
+			cfg.GeoSites = append(cfg.GeoSites[:idx], cfg.GeoSites[idx+1:]...)
+			success("Removed GeoSite: %s", selector)
+			changed = true
+			continue
 		}
-		success("Removed: %s", domain)
-		changed = true
+		warn("Not found: %s", target)
 	}
 	if !changed {
 		return nil
 	}
-	if err := saveConfig(cfg); err != nil {
+	return applyConfig(cfg)
+}
+
+func cmdUpdate() error {
+	header("Updating Domain List Community")
+	p := getPaths()
+	dataSnap, err := snapshotFile(p.DLC)
+	if err != nil {
 		return err
 	}
-	return syncAll()
+	sumSnap, err := snapshotFile(p.DLCSum)
+	if err != nil {
+		return err
+	}
+	changed, hash, err := updateDLC()
+	if err != nil {
+		return err
+	}
+	if changed {
+		success("Updated dlc.dat (%s)", hash[:12])
+	} else {
+		info("dlc.dat is already current (%s)", hash[:12])
+	}
+	cfg, err := loadConfig()
+	if err != nil {
+		return err
+	}
+	if changed && len(cfg.GeoSites) > 0 {
+		if err := syncAll(); err != nil {
+			_ = restoreSnapshot(dataSnap)
+			_ = restoreSnapshot(sumSnap)
+			return err
+		}
+	}
+	return nil
 }
 
 func cmdStatus() error {
@@ -182,13 +269,21 @@ func cmdStatus() error {
 	if err != nil {
 		return err
 	}
-	if len(cfg.Domains) == 0 {
-		info("No domains configured.")
+	if len(cfg.Domains) == 0 && len(cfg.GeoSites) == 0 {
+		info("No proxy rules configured.")
 		return nil
 	}
-	header("Configured Domains (%d)", len(cfg.Domains))
-	printDomainGroup(cfg, "service", "Reverse Proxy Services")
-	printDomainGroup(cfg, "proxy", "Proxies (Passthrough)")
+	if len(cfg.Domains) > 0 {
+		header("Configured Domains (%d)", len(cfg.Domains))
+		printDomainGroup(cfg, "service", "Reverse Proxy Services")
+		printDomainGroup(cfg, "proxy", "Passthrough Domains")
+	}
+	if len(cfg.GeoSites) > 0 {
+		fmt.Printf("\n%sGeoSite Selectors:%s\n", bold, reset)
+		for _, selector := range cfg.GeoSites {
+			fmt.Printf("  %s\n", selector)
+		}
+	}
 	return nil
 }
 
@@ -232,6 +327,11 @@ func cmdDoctor(verbose bool) error {
 	fmt.Printf("\n%sServices:%s\n", bold, reset)
 	printStatus("Angie", isActive("angie"))
 	printStatus("Blocky", isActive("blocky"))
+	if fileExists(getPaths().DLC) {
+		fmt.Printf("  %-15s %savailable%s\n", "dlc.dat", green, reset)
+	} else {
+		fmt.Printf("  %-15s %smissing%s\n", "dlc.dat", yellow, reset)
+	}
 	if !commandExists("angie") {
 		warn("Angie is not installed")
 	}

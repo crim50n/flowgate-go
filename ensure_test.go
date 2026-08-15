@@ -84,7 +84,7 @@ http { include /etc/angie/http.d/*.conf; }
 	if !strings.Contains(body, "resolver 9.9.9.9 ipv6=off;") {
 		t.Fatal("existing stream resolver was not preserved")
 	}
-	if strings.Contains(renderAngieStream(testConfig()), "resolver ") {
+	if strings.Contains(renderAngieStream(testConfig(), testRules(t)), "resolver ") {
 		t.Fatal("generated stream config must not contain resolver")
 	}
 }

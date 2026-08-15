@@ -6,7 +6,7 @@ ANGIE_PID=""
 SHUTDOWN=0
 
 start_blocky() {
-    su-exec blocky:blocky blocky --config /etc/blocky/config.yml &
+    su-exec blocky blocky --config /etc/blocky/config.yml &
     DNS_PID=$!
 }
 

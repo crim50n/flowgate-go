@@ -93,6 +93,91 @@ func serviceControl(name, action string) error {
 	return nil
 }
 
+func expectedExecutableNames(name string) map[string]struct{} {
+	names := map[string]struct{}{name: {}}
+	if path, err := exec.LookPath(name); err == nil {
+		names[filepath.Base(path)] = struct{}{}
+		if resolved, err := filepath.EvalSymlinks(path); err == nil {
+			names[filepath.Base(resolved)] = struct{}{}
+		}
+	}
+	return names
+}
+
+func processMatchesName(pid int, name string) bool {
+	names := expectedExecutableNames(name)
+	exe, err := os.Readlink(fmt.Sprintf("/proc/%d/exe", pid))
+	if err == nil {
+		exe = strings.TrimSuffix(exe, " (deleted)")
+		if _, ok := names[filepath.Base(exe)]; ok {
+			return true
+		}
+	}
+	comm, err := os.ReadFile(fmt.Sprintf("/proc/%d/comm", pid))
+	if err != nil {
+		return false
+	}
+	_, ok := names[strings.TrimSpace(string(comm))]
+	return ok
+}
+
+func exactProcessPIDs(name string) []int {
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		return nil
+	}
+	var pids []int
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		pid, err := strconv.Atoi(entry.Name())
+		if err == nil && processMatchesName(pid, name) {
+			pids = append(pids, pid)
+		}
+	}
+	sort.Ints(pids)
+	return pids
+}
+
+func processParentPID(pid int) int {
+	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/status", pid))
+	if err != nil {
+		return 0
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		if strings.HasPrefix(line, "PPid:") {
+			fields := strings.Fields(line)
+			if len(fields) == 2 {
+				ppid, _ := strconv.Atoi(fields[1])
+				return ppid
+			}
+		}
+	}
+	return 0
+}
+
+func controlProcessPID(name string) (int, error) {
+	pids := exactProcessPIDs(name)
+	if len(pids) == 0 {
+		return 0, nil
+	}
+	set := make(map[int]struct{}, len(pids))
+	for _, pid := range pids {
+		set[pid] = struct{}{}
+	}
+	var roots []int
+	for _, pid := range pids {
+		if _, child := set[processParentPID(pid)]; !child {
+			roots = append(roots, pid)
+		}
+	}
+	if len(roots) != 1 {
+		return 0, fmt.Errorf("ambiguous %s processes: %v", name, roots)
+	}
+	return roots[0], nil
+}
+
 func signalProcess(name, action string) error {
 	if action == "start" {
 		return nil
@@ -100,16 +185,15 @@ func signalProcess(name, action string) error {
 	if action != "reload" && action != "restart" && action != "stop" {
 		return nil
 	}
-	out, _, code, _ := run("pgrep", "-f", name)
-	if code != 0 || strings.TrimSpace(out) == "" {
+	pid, err := controlProcessPID(name)
+	if err != nil {
+		return err
+	}
+	if pid == 0 {
 		if action == "reload" {
 			return fmt.Errorf("process %s not found", name)
 		}
 		return nil
-	}
-	pid, err := strconv.Atoi(strings.Fields(out)[0])
-	if err != nil {
-		return err
 	}
 	sig := syscall.SIGHUP
 	if action == "restart" || action == "stop" {
@@ -138,8 +222,7 @@ func isActive(name string) bool {
 		out, _, _, _ = run("s6-svstat", "/run/service/"+name)
 		return strings.Contains(strings.ToLower(out), "up")
 	}
-	_, _, code, _ = run("pgrep", "-f", name)
-	return code == 0
+	return len(exactProcessPIDs(name)) > 0
 }
 func detectStack() Stack {
 	if root := os.Getenv("FLOWGATE_ROOT"); root != "" && root != "/" {
@@ -156,17 +239,27 @@ func backupConfigs() error {
 	if err := os.MkdirAll(p.BackupDir, 0750); err != nil {
 		return err
 	}
-	stamp := time.Now().Format("20060102_150405")
-	for _, src := range []string{p.Blocky, p.AngieMain, p.AngieStream, p.AngieHTTP, p.ConfigFile} {
-		if !fileExists(src) {
+	stamp := time.Now().Format("20060102_150405.000000000")
+	files := []struct {
+		name string
+		path string
+	}{
+		{"blocky-config", p.Blocky},
+		{"blocky-list", p.BlockyList},
+		{"angie-main", p.AngieMain},
+		{"angie-stream", p.AngieStream},
+		{"angie-http", p.AngieHTTP},
+		{"flowgate-config", p.ConfigFile},
+	}
+	for _, file := range files {
+		if !fileExists(file.path) {
 			continue
 		}
-		base := filepath.Base(src)
-		dst := filepath.Join(p.BackupDir, base+"_"+stamp+".bak")
-		if err := copyFile(src, dst); err != nil {
+		dst := filepath.Join(p.BackupDir, file.name+"_"+stamp+".bak")
+		if err := copyFile(file.path, dst); err != nil {
 			return err
 		}
-		matches, _ := filepath.Glob(filepath.Join(p.BackupDir, base+"_*.bak"))
+		matches, _ := filepath.Glob(filepath.Join(p.BackupDir, file.name+"_*.bak"))
 		sort.Strings(matches)
 		const keep = 3
 		if len(matches) > keep {

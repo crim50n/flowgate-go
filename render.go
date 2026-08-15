@@ -4,7 +4,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -30,22 +32,40 @@ func ensureProxyIP(cfg *Config) error {
 		return err
 	}
 	cfg.Settings.ProxyIP = ip
-	if err = saveConfig(cfg); err != nil {
-		return err
-	}
 	info("Updated proxy_ip to: %s", ip)
 	return nil
 }
-func renderBlocky(cfg *Config) ([]byte, error) {
+
+func renderBlockyProxyList(rules []ProxyRule) ([]byte, error) {
+	var b strings.Builder
+	for _, rule := range rules {
+		switch rule.Type {
+		case RuleRootDomain:
+			fmt.Fprintf(&b, "*.%s\n", strings.ToLower(rule.Value))
+		case RuleFull:
+			fmt.Fprintf(&b, "%s\n", strings.ToLower(rule.Value))
+		case RulePlain:
+			fmt.Fprintf(&b, "/%s/\n", regexp.QuoteMeta(strings.ToLower(rule.Value)))
+		case RuleRegex:
+			if strings.Contains(rule.Value, "/") {
+				return nil, fmt.Errorf("geosite regex contains unsupported '/': %s", rule.Value)
+			}
+			fmt.Fprintf(&b, "/%s/\n", rule.Value)
+		default:
+			return nil, fmt.Errorf("unsupported proxy rule type: %d", rule.Type)
+		}
+	}
+	return []byte(b.String()), nil
+}
+
+func renderBlocky(cfg *Config, rules []ProxyRule) ([]byte, error) {
+	return renderBlockyWithListPath(cfg, rules, certRefPath(getPaths().BlockyList))
+}
+
+func renderBlockyWithListPath(cfg *Config, rules []ProxyRule, listPath string) ([]byte, error) {
 	if err := ensureProxyIP(cfg); err != nil {
 		return nil, err
 	}
-
-	mapping := map[string]string{}
-	for _, domain := range sortedDomains(cfg, "proxy") {
-		mapping[domain] = cfg.Settings.ProxyIP
-	}
-
 	out := map[string]interface{}{
 		"upstreams": map[string]interface{}{
 			"groups": map[string]interface{}{
@@ -55,14 +75,18 @@ func renderBlocky(cfg *Config) ([]byte, error) {
 				},
 			},
 		},
-		"customDNS": map[string]interface{}{
-			"mapping": mapping,
-		},
-		"ports": map[string]interface{}{
-			"dns":  53,
-			"http": 4000,
-		},
-		"log": map[string]interface{}{"level": "info"},
+		"ports": map[string]interface{}{"dns": 53, "http": 4000},
+		"log":   map[string]interface{}{"level": "info"},
+	}
+	if len(rules) > 0 {
+		out["blocking"] = map[string]interface{}{
+			"denylists": map[string]interface{}{
+				"flowgate": []string{listPath},
+			},
+			"clientGroupsBlock": map[string]interface{}{"default": []string{"flowgate"}},
+			"blockType":         cfg.Settings.ProxyIP,
+			"blockTTL":          "1m",
+		}
 	}
 	domain := dnsDomain(cfg)
 	if cert, key := certPaths(domain); cert != "" && key != "" {
@@ -72,17 +96,39 @@ func renderBlocky(cfg *Config) ([]byte, error) {
 		out["certFile"] = certRefPath(cert)
 		out["keyFile"] = certRefPath(key)
 	}
-
 	return yaml.Marshal(out)
 }
 
-func renderAngieStream(cfg *Config) string {
+func angieRegexKey(prefix, pattern string) string {
+	return strconv.Quote(prefix + pattern)
+}
+
+func renderAngieStream(cfg *Config, rules []ProxyRule) string {
 	var b strings.Builder
+	rootDomains := make(map[string]struct{})
+	for _, rule := range rules {
+		if rule.Type == RuleRootDomain {
+			rootDomains[strings.ToLower(rule.Value)] = struct{}{}
+		}
+	}
 	b.WriteString("map $ssl_preread_server_name $flowgate_origin {\n")
 	b.WriteString("    hostnames;\n")
 	b.WriteString("    default \"\";\n")
-	for _, domain := range sortedDomains(cfg, "proxy") {
-		fmt.Fprintf(&b, "    .%s $ssl_preread_server_name;\n", domain)
+	for _, rule := range rules {
+		switch rule.Type {
+		case RuleRootDomain:
+			fmt.Fprintf(&b, "    .%s $ssl_preread_server_name;\n", strings.ToLower(rule.Value))
+		case RuleFull:
+			value := strings.ToLower(rule.Value)
+			if _, covered := rootDomains[value]; covered {
+				continue
+			}
+			fmt.Fprintf(&b, "    %s $ssl_preread_server_name;\n", value)
+		case RulePlain:
+			fmt.Fprintf(&b, "    %s $ssl_preread_server_name;\n", angieRegexKey("~*", regexp.QuoteMeta(rule.Value)))
+		case RuleRegex:
+			fmt.Fprintf(&b, "    %s $ssl_preread_server_name;\n", angieRegexKey("~", rule.Value))
+		}
 	}
 	b.WriteString("}\n\n")
 
@@ -132,14 +178,12 @@ func renderAngieHTTP(cfg *Config) string {
 			ip = "127.0.0.1"
 		}
 		name := acmeName(domain)
-
 		cert := rooted(filepath.Join("/var/lib/angie/acme", "acme_"+name, "certificate.pem"))
 		key := rooted(filepath.Join("/var/lib/angie/acme", "acme_"+name, "private.key"))
 		if !nonEmptyFile(cert) || !fileExists(key) {
 			cert = rooted("/etc/ssl/certs/ssl-cert-snakeoil.pem")
 			key = rooted("/etc/ssl/private/ssl-cert-snakeoil.key")
 		}
-
 		scheme := "http"
 		if entry.Port == 8443 {
 			scheme = "https"

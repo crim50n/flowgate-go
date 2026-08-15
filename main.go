@@ -11,20 +11,32 @@ func usage() {
 Usage:
   flowgate init
   flowgate doctor [-v|--verbose]
-  flowgate add DOMAIN [DOMAIN...]
+  flowgate add DOMAIN|GEOSITE [DOMAIN|GEOSITE...]
   flowgate service DOMAIN PORT [--ip IP]
   flowgate dns DOMAIN
-  flowgate remove DOMAIN [DOMAIN...]
+  flowgate remove DOMAIN|GEOSITE [DOMAIN|GEOSITE...]
   flowgate status
+  flowgate update
   flowgate sync
+  flowgate version
 
-Commands add, service, dns and remove automatically run sync.`)
+Commands add, service, dns and remove automatically run sync.
+GeoSite selectors are resolved from the locally stored dlc.dat.`)
 }
 
 func main() {
 	if len(os.Args) < 2 {
 		usage()
 		os.Exit(2)
+	}
+
+	if commandNeedsLock(os.Args[1]) {
+		lock, err := acquireProcessLock()
+		if err != nil {
+			fail("%v", err)
+			os.Exit(1)
+		}
+		defer lock.Close()
 	}
 
 	var err error
@@ -43,8 +55,12 @@ func main() {
 		err = cmdRemove(os.Args[2:])
 	case "status":
 		err = cmdStatus()
+	case "update":
+		err = cmdUpdate()
 	case "sync":
 		err = syncAll()
+	case "version", "--version":
+		err = cmdVersion()
 	case "help", "-h", "--help":
 		usage()
 		return

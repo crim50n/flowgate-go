@@ -28,7 +28,7 @@ func TestValidateConfigRejectsDanglingDNSDomain(t *testing.T) {
 	cfg := &Config{
 		Settings: Settings{ProxyIP: "203.0.113.10", DNSDomain: "dns.example.com"},
 		Domains: map[string]Domain{
-			"openai.com": {Type: "proxy"},
+			"external.example.com": {Type: "proxy"},
 		},
 	}
 	if err := validateConfig(cfg); err == nil {
@@ -45,5 +45,22 @@ func TestValidateConfigAcceptsServiceDNSDomain(t *testing.T) {
 	}
 	if err := validateConfig(cfg); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestValidateConfigRejectsInvalidGeoSites(t *testing.T) {
+	for _, selectors := range [][]string{
+		{"bad selector"},
+		{"category-test", "CATEGORY-TEST"},
+		{"../category-test"},
+	} {
+		cfg := &Config{
+			Settings: Settings{ProxyIP: "203.0.113.10"},
+			Domains:  map[string]Domain{},
+			GeoSites: selectors,
+		}
+		if err := validateConfig(cfg); err == nil {
+			t.Fatalf("selectors %#v unexpectedly valid", selectors)
+		}
 	}
 }

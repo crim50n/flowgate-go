@@ -29,6 +29,17 @@ func validateConfig(cfg *Config) error {
 	if cfg.Settings.ProxyIP != "" && !validIP(cfg.Settings.ProxyIP) {
 		return fmt.Errorf("invalid settings.proxy_ip: %s", cfg.Settings.ProxyIP)
 	}
+	seenGeoSites := make(map[string]struct{}, len(cfg.GeoSites))
+	for _, selector := range cfg.GeoSites {
+		name := normalizeGeoSiteName(selector)
+		if !validGeoSiteName(name) {
+			return fmt.Errorf("invalid geosite selector: %q", selector)
+		}
+		if _, exists := seenGeoSites[name]; exists {
+			return fmt.Errorf("duplicate geosite selector: %s", name)
+		}
+		seenGeoSites[name] = struct{}{}
+	}
 	for domain, entry := range cfg.Domains {
 		if !validDomain(domain) {
 			return fmt.Errorf("invalid domain: %s", domain)
@@ -86,7 +97,7 @@ func loadConfig() (*Config, error) {
 		if e != nil {
 			return nil, e
 		}
-		cfg := &Config{Settings: Settings{ProxyIP: ip}, Domains: map[string]Domain{}}
+		cfg := &Config{Settings: Settings{ProxyIP: ip}, Domains: map[string]Domain{}, GeoSites: []string{}}
 		if e = saveConfig(cfg); e != nil {
 			return nil, e
 		}
@@ -104,6 +115,9 @@ func loadConfig() (*Config, error) {
 	if cfg.Domains == nil {
 		cfg.Domains = map[string]Domain{}
 	}
+	if cfg.GeoSites == nil {
+		cfg.GeoSites = []string{}
+	}
 	if err := validateConfig(cfg); err != nil {
 		return nil, fmt.Errorf("invalid config: %w", err)
 	}
@@ -115,18 +129,44 @@ func saveConfig(cfg *Config) error {
 		return fmt.Errorf("invalid config: %w", err)
 	}
 	p := getPaths()
-	if err := os.MkdirAll(p.ConfigDir, 0755); err != nil {
-		return err
-	}
 	b, err := yaml.Marshal(cfg)
 	if err != nil {
 		return err
 	}
-	tmp := p.ConfigFile + ".tmp"
-	if err = os.WriteFile(tmp, b, 0644); err != nil {
+	return writeAtomic(p.ConfigFile, b, 0644)
+}
+
+func saveAppliedConfig(cfg *Config) error {
+	if err := validateConfig(cfg); err != nil {
 		return err
 	}
-	return os.Rename(tmp, p.ConfigFile)
+	data, err := yaml.Marshal(cfg)
+	if err != nil {
+		return err
+	}
+	return writeAtomic(getPaths().AppliedConfig, data, 0644)
+}
+
+func restoreAppliedConfig() error {
+	p := getPaths()
+	data, err := os.ReadFile(p.AppliedConfig)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	var cfg Config
+	if err := yaml.Unmarshal(data, &cfg); err != nil {
+		return err
+	}
+	if cfg.Domains == nil {
+		cfg.Domains = map[string]Domain{}
+	}
+	if err := validateConfig(&cfg); err != nil {
+		return err
+	}
+	return writeAtomic(p.ConfigFile, data, 0644)
 }
 
 func dnsDomain(cfg *Config) string {

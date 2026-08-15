@@ -14,6 +14,7 @@ type Domain struct {
 type Config struct {
 	Settings Settings          `yaml:"settings"`
 	Domains  map[string]Domain `yaml:"domains"`
+	GeoSites []string          `yaml:"geosites,omitempty"`
 }
 
 type Stack struct {
@@ -22,12 +23,16 @@ type Stack struct {
 }
 
 type Paths struct {
-	ConfigDir   string
-	DataDir     string
-	BackupDir   string
-	ConfigFile  string
-	Blocky      string
-	AngieMain   string
-	AngieStream string
-	AngieHTTP   string
+	ConfigDir     string
+	DataDir       string
+	BackupDir     string
+	ConfigFile    string
+	AppliedConfig string
+	Blocky        string
+	AngieMain     string
+	AngieStream   string
+	AngieHTTP     string
+	BlockyList    string
+	DLC           string
+	DLCSum        string
 }

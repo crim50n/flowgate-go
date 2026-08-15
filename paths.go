@@ -17,13 +17,17 @@ func getPaths() Paths {
 	configDir := rooted("/etc/flowgate")
 	dataDir := rooted("/var/lib/flowgate")
 	return Paths{
-		ConfigDir:   configDir,
-		DataDir:     dataDir,
-		BackupDir:   filepath.Join(dataDir, "backups"),
-		ConfigFile:  filepath.Join(configDir, "flowgate.yaml"),
-		Blocky:      rooted("/etc/blocky/config.yml"),
-		AngieMain:   rooted("/etc/angie/angie.conf"),
-		AngieStream: rooted("/etc/angie/stream.d/ai-proxy.conf"),
-		AngieHTTP:   rooted("/etc/angie/http.d/local-services.conf"),
+		ConfigDir:     configDir,
+		DataDir:       dataDir,
+		BackupDir:     filepath.Join(dataDir, "backups"),
+		ConfigFile:    filepath.Join(configDir, "flowgate.yaml"),
+		AppliedConfig: filepath.Join(dataDir, "applied.yaml"),
+		Blocky:        rooted("/etc/blocky/config.yml"),
+		AngieMain:     rooted("/etc/angie/angie.conf"),
+		AngieStream:   rooted("/etc/angie/stream.d/flowgate.conf"),
+		AngieHTTP:     rooted("/etc/angie/http.d/flowgate.conf"),
+		BlockyList:    rooted("/etc/blocky/flowgate.list"),
+		DLC:           filepath.Join(dataDir, "dlc.dat"),
+		DLCSum:        filepath.Join(dataDir, "dlc.dat.sha256sum"),
 	}
 }

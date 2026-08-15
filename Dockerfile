@@ -1,15 +1,18 @@
-FROM golang:1.25.6-alpine@sha256:98e6cffc31ccc44c7c15d83df1d69891efee8115a5bb7ede2bf30a38af3e3c92 AS builder
+FROM golang:1.25.13-alpine@sha256:844b27705f54e73773e0f9bc3c780633b9d7f4b4831bf35cdad02a81a4c80bd0 AS builder
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
+ARG VERSION=dev
 COPY *.go flowgate.yaml.default ./
 RUN CGO_ENABLED=0 go build -trimpath -buildvcs=false \
-    -gcflags='all=-l' -ldflags='-s -w -buildid=' \
+    -gcflags='all=-l' -ldflags="-s -w -buildid= -X main.version=${VERSION}" \
     -o /out/flowgate .
 
 FROM alpine:3.22@sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc1f695dce
+ARG VERSION=dev
 ARG ANGIE_VERSION=1.12.1-r0
 ARG BLOCKY_VERSION=v0.28.2
+LABEL org.opencontainers.image.version="${VERSION}"
 
 RUN apk add --no-cache ca-certificates libcap su-exec \
     && wget -qO /etc/apk/keys/angie-signing.rsa \

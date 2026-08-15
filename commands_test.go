@@ -46,7 +46,7 @@ func TestDNSConvertsExistingProxyToService(t *testing.T) {
 	if strings.Contains(string(blocky), "dns.example.com") {
 		t.Fatal("DNS service domain leaked into Blocky mapping")
 	}
-	stream, err := os.ReadFile(filepath.Join(root, "etc/angie/stream.d/ai-proxy.conf"))
+	stream, err := os.ReadFile(filepath.Join(root, "etc/angie/stream.d/flowgate.conf"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -72,5 +72,49 @@ func TestRemovePrimaryDNSClearsSetting(t *testing.T) {
 	}
 	if got.Settings.DNSDomain != "" {
 		t.Fatalf("dns_domain not cleared: %q", got.Settings.DNSDomain)
+	}
+}
+
+func TestAddGeoSiteCompilesRules(t *testing.T) {
+	cfg := &Config{
+		Settings: Settings{ProxyIP: "203.0.113.10"},
+		Domains:  map[string]Domain{},
+		GeoSites: []string{},
+	}
+	root := setupTestRoot(t, cfg)
+	p := getPaths()
+	if err := os.MkdirAll(p.DataDir, 0750); err != nil {
+		t.Fatal(err)
+	}
+	data := buildTestDLC("CATEGORY-TEST", []ProxyRule{
+		{Type: RuleRootDomain, Value: "example.com"},
+		{Type: RuleFull, Value: "full.example.net"},
+	})
+	if err := os.WriteFile(p.DLC, data, 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmdAdd([]string{"category-test"}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := loadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.GeoSites) != 1 || got.GeoSites[0] != "category-test" {
+		t.Fatalf("geosites = %#v", got.GeoSites)
+	}
+	list, err := os.ReadFile(filepath.Join(root, "etc/blocky/flowgate.list"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(list), "*.example.com") || !strings.Contains(string(list), "full.example.net") {
+		t.Fatal("GeoSite rules missing from Blocky list")
+	}
+	stream, err := os.ReadFile(filepath.Join(root, "etc/angie/stream.d/flowgate.conf"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(stream), ".example.com $ssl_preread_server_name;") {
+		t.Fatal("GeoSite rule missing from Angie")
 	}
 }

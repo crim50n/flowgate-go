@@ -17,14 +17,29 @@ import (
 )
 
 func writeAtomic(path string, data []byte, mode os.FileMode) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0755); err != nil {
 		return err
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, mode); err != nil {
+	file, err := os.CreateTemp(dir, "."+filepath.Base(path)+".tmp-*")
+	if err != nil {
 		return err
 	}
-	if err := os.Chmod(tmp, mode); err != nil {
+	tmp := file.Name()
+	defer os.Remove(tmp)
+	if _, err := file.Write(data); err != nil {
+		file.Close()
+		return err
+	}
+	if err := file.Chmod(mode); err != nil {
+		file.Close()
+		return err
+	}
+	if err := file.Sync(); err != nil {
+		file.Close()
+		return err
+	}
+	if err := file.Close(); err != nil {
 		return err
 	}
 	return os.Rename(tmp, path)
@@ -67,7 +82,12 @@ worker_processes auto;
 pid /run/angie.pid;
 error_log /var/log/angie/error.log info;
 events { worker_connections 1024; }
-stream { include /etc/angie/stream.d/*.conf; }
+stream {
+    resolver 1.1.1.1 8.8.8.8 ipv6=off;
+    map_hash_bucket_size 128;
+    map_hash_max_size 262144;
+    include /etc/angie/stream.d/*.conf;
+}
 http {
     include /etc/angie/mime.types;
     default_type application/octet-stream;
@@ -96,18 +116,10 @@ http {
 }
 
 func writeAngieMain(path string, data []byte) error {
-	snap, err := snapshotFile(path)
-	if err != nil {
+	if err := validateAngieConfigCandidate(data, nil, nil); err != nil {
 		return err
 	}
-	if err := writeAtomic(path, data, 0644); err != nil {
-		return err
-	}
-	if err := validateAngieOnDisk(); err != nil {
-		_ = restoreSnapshot(snap)
-		return err
-	}
-	return nil
+	return writeAtomic(path, data, 0644)
 }
 
 func validateAngieOnDisk() error {
@@ -281,11 +293,17 @@ func enableStreamBlock(text string) string {
 		if !strings.HasSuffix(text, "\n") {
 			text += "\n"
 		}
-		return text + "\nstream {\n    " + resolver + "\n    " + include + "\n}\n"
+		return text + "\nstream {\n    " + resolver + "\n    map_hash_bucket_size 128;\n    map_hash_max_size 262144;\n    " + include + "\n}\n"
 	}
 	text, _ = addToContext(text, "stream", include)
 	if !contextHasTopLevelDirective(text, "stream", "resolver") {
 		text, _ = addToContext(text, "stream", resolver)
+	}
+	if !contextHasTopLevelDirective(text, "stream", "map_hash_bucket_size") {
+		text, _ = addToContext(text, "stream", "map_hash_bucket_size 128;")
+	}
+	if !contextHasTopLevelDirective(text, "stream", "map_hash_max_size") {
+		text, _ = addToContext(text, "stream", "map_hash_max_size 262144;")
 	}
 	return text
 }

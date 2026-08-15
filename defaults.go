@@ -24,6 +24,9 @@ func installDefaultConfig() (*Config, error) {
 	if cfg.Domains == nil {
 		cfg.Domains = map[string]Domain{}
 	}
+	if cfg.GeoSites == nil {
+		cfg.GeoSites = []string{}
+	}
 
 	proxyIP := os.Getenv("PROXY_IP")
 	switch proxyIP {
