@@ -1,0 +1,80 @@
+name: Build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  GO_VERSION: "1.25.6"
+  UPX_VERSION: "5.1.1"
+  UPX_SHA256: "1ff660454227861e00772f743f66b900072116b9dc24f6ee28b97cce88a7828a"
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      - run: go test ./...
+      - run: go vet ./...
+
+  build:
+    needs: test
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        goarch: [amd64, arm64]
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Install UPX
+        run: |
+          curl -fsSLo /tmp/upx.tar.xz \
+            "https://github.com/upx/upx/releases/download/v${UPX_VERSION}/upx-${UPX_VERSION}-amd64_linux.tar.xz"
+          echo "${UPX_SHA256}  /tmp/upx.tar.xz" | sha256sum -c -
+          mkdir -p /tmp/upx
+          tar -xJf /tmp/upx.tar.xz -C /tmp/upx --strip-components=1
+          echo "/tmp/upx" >> "$GITHUB_PATH"
+
+      - name: Build minimal binary
+        env:
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          set -eu
+          mkdir -p dist
+          name="flowgate-linux-${GOARCH}"
+          CGO_ENABLED=0 GOOS=linux GOARCH="$GOARCH" \
+            go build \
+              -trimpath \
+              -buildvcs=false \
+              -gcflags='all=-l' \
+              -ldflags='-s -w -buildid=' \
+              -o "dist/${name}" .
+          chmod 0755 "dist/${name}"
+          upx --best --lzma "dist/${name}"
+          upx -t "dist/${name}"
+          sha256sum "dist/${name}" > "dist/${name}.sha256"
+          if [ "$GOARCH" = amd64 ]; then
+            "dist/${name}" --help >/dev/null
+          fi
+          stat -c '%n %s bytes' "dist/${name}"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: flowgate-linux-${{ matrix.goarch }}
+          path: |
+            dist/flowgate-linux-${{ matrix.goarch }}
+            dist/flowgate-linux-${{ matrix.goarch }}.sha256
+          if-no-files-found: error
+          compression-level: 0
