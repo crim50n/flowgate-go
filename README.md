@@ -60,7 +60,7 @@ flowgate sync
 flowgate version
 ```
 
-`add`, `service`, `dns`, and `remove` run synchronization immediately.
+`add`, `service`, `dns`, and `remove` run synchronization immediately. Blocky is restarted only when its generated configuration, domain list, or TLS certificate changes, or when the service is not running; Angie keeps its normal validation and reload behavior.
 
 `flowgate dns dns.example.com` records the primary DNS hostname and creates the Angie reverse-proxy route to Blocky's HTTPS endpoint. The hostname must resolve to the Flowgate server through authoritative DNS. On first setup, Angie must obtain the ACME certificate before Blocky can enable its own `https: 8443` and `tls: 853` listeners; the next `flowgate sync` after the certificate appears enables those listeners.
 

@@ -75,7 +75,7 @@ jobs:
           docker cp /tmp/flowgate-go.test flowgate-integration:/tmp/flowgate-go.test
           docker exec -e FLOWGATE_INTEGRATION=1 flowgate-integration \
             /tmp/flowgate-go.test -test.run \
-            '^(TestValidateAngieCandidateDoesNotTouchProduction|TestRestoreRuntimeWithNoInitSupervisor)$' -test.v
+            '^(TestValidateAngieCandidateDoesNotTouchProduction|TestRestoreRuntimeWithNoInitSupervisor|TestRestoreRuntimeSkipsUntouchedBlocky)$' -test.v
           docker exec flowgate-integration angie -t
           docker exec flowgate-integration blocky --config /etc/blocky/config.yml validate
       - name: Verify concurrent CLI serialization
@@ -86,6 +86,13 @@ jobs:
           wait "$p2"
           docker exec flowgate-integration grep -q 'race-a.example.com:' /etc/flowgate/flowgate.yaml
           docker exec flowgate-integration grep -q 'race-b.example.com:' /etc/flowgate/flowgate.yaml
+      - name: Verify service changes do not restart Blocky
+        run: |
+          blocky_pid=$(docker exec flowgate-integration pgrep -x blocky | head -n1)
+          for n in 1 2 3 4 5 6; do
+            docker exec flowgate-integration flowgate service "service-${n}.example.com" "$((8000 + n))"
+            test "$(docker exec flowgate-integration pgrep -x blocky | head -n1)" = "$blocky_pid"
+          done
       - name: Verify DNS TLS bootstrap
         run: |
           docker exec flowgate-integration flowgate dns dns.example.com
@@ -106,6 +113,35 @@ jobs:
           active=$(printf '%s\n' "$status" | grep -c 'ACTIVE' || true)
           [ "$active" -ge 2 ]
           ! printf '%s\n' "$status" | grep -q 'INACTIVE'
+      - name: Verify TLS service changes do not restart Blocky
+        run: |
+          blocky_pid=$(docker exec flowgate-integration pgrep -x blocky | head -n1)
+          for n in 7 8 9; do
+            docker exec flowgate-integration flowgate service "tls-service-${n}.example.com" "$((8000 + n))"
+            test "$(docker exec flowgate-integration pgrep -x blocky | head -n1)" = "$blocky_pid"
+          done
+      - name: Verify certificate renewal restarts Blocky once
+        run: |
+          blocky_pid=$(docker exec flowgate-integration pgrep -x blocky | head -n1)
+          docker exec -e FLOWGATE_ROOT=/tmp/renewal-root -e PROXY_IP=203.0.113.10 \
+            flowgate-integration flowgate init >/tmp/renewal-init.log
+          docker exec flowgate-integration sh -c '
+            cp /tmp/renewal-root/etc/ssl/certs/ssl-cert-snakeoil.pem /var/lib/angie/acme/acme_dns_example_com/certificate.pem &&
+            cp /tmp/renewal-root/etc/ssl/private/ssl-cert-snakeoil.key /var/lib/angie/acme/acme_dns_example_com/private.key'
+          docker exec flowgate-integration flowgate sync
+          renewed_pid=""
+          for i in $(seq 1 50); do
+            pid=$(docker exec flowgate-integration pgrep -x blocky | head -n1 || true)
+            if [ -n "$pid" ] && [ "$pid" != "$blocky_pid" ]; then
+              renewed_pid="$pid"
+              break
+            fi
+            sleep 0.1
+          done
+          test -n "$renewed_pid"
+          docker exec flowgate-integration flowgate sync
+          sleep 1
+          test "$(docker exec flowgate-integration pgrep -x blocky | head -n1)" = "$renewed_pid"
       - name: Cleanup runtime
         if: always()
         run: docker rm -f flowgate-integration >/dev/null 2>&1 || true

@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"crypto/sha256"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -63,6 +65,71 @@ func buildSyncCandidate(cfg *Config, rules []ProxyRule) (*syncCandidate, error) 
 		angieStream:  []byte(renderAngieStream(cfg, rules)),
 		angieHTTP:    []byte(renderAngieHTTP(cfg)),
 	}, nil
+}
+
+func blockyFilesChanged(c *syncCandidate) (bool, error) {
+	p := getPaths()
+	for _, item := range []struct {
+		path string
+		data []byte
+	}{
+		{p.Blocky, c.blockyConfig},
+		{p.BlockyList, c.blockyList},
+	} {
+		current, err := os.ReadFile(item.path)
+		if os.IsNotExist(err) {
+			return true, nil
+		}
+		if err != nil {
+			return false, err
+		}
+		if !bytes.Equal(current, item.data) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func blockyCertificateHash(cfg *Config) (string, error) {
+	cert, key := certPaths(dnsDomain(cfg))
+	if cert == "" || key == "" {
+		return "", nil
+	}
+	h := sha256.New()
+	for _, path := range []string{cert, key} {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return "", err
+		}
+		_, _ = h.Write(data)
+	}
+	return fmt.Sprintf("%x", h.Sum(nil)), nil
+}
+
+func blockyCertificateChanged(cfg *Config) (bool, string, error) {
+	hash, err := blockyCertificateHash(cfg)
+	if err != nil || hash == "" {
+		return false, hash, err
+	}
+	data, err := os.ReadFile(getPaths().BlockyCertSum)
+	if os.IsNotExist(err) {
+		return true, hash, nil
+	}
+	if err != nil {
+		return false, "", err
+	}
+	return strings.TrimSpace(string(data)) != hash, hash, nil
+}
+
+func saveBlockyCertificateHash(hash string) error {
+	path := getPaths().BlockyCertSum
+	if hash == "" {
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+		return nil
+	}
+	return writeAtomic(path, []byte(hash+"\n"), 0640)
 }
 func validateBlockyCandidate(cfg *Config, rules []ProxyRule, listData []byte) error {
 	if root := os.Getenv("FLOWGATE_ROOT"); root != "" && root != "/" {
@@ -202,14 +269,18 @@ func restoreManagedFiles(snaps []fileSnapshot) error {
 }
 
 func restoreRuntime(stack Stack, angieWasActive, blockyWasActive bool) {
-	if stack.Angie {
+	restoreRuntimeComponents(stack, true, true, angieWasActive, blockyWasActive)
+}
+
+func restoreRuntimeComponents(stack Stack, restoreAngie, restoreBlocky, angieWasActive, blockyWasActive bool) {
+	if stack.Angie && restoreAngie {
 		if angieWasActive {
 			_ = serviceControl("angie", "reload")
 		} else if isActive("angie") {
 			_ = serviceControl("angie", "stop")
 		}
 	}
-	if stack.Blocky {
+	if stack.Blocky && restoreBlocky {
 		if blockyWasActive {
 			_ = serviceControl("blocky", "restart")
 		} else if isActive("blocky") {
@@ -217,17 +288,26 @@ func restoreRuntime(stack Stack, angieWasActive, blockyWasActive bool) {
 		}
 	}
 }
-func applySyncCandidate(stack Stack, c *syncCandidate) error {
+
+func restartOrStartBlocky() error {
+	if isActive("blocky") {
+		return serviceControl("blocky", "restart")
+	}
+	return serviceControl("blocky", "start")
+}
+
+func applySyncCandidate(stack Stack, c *syncCandidate, restartBlocky bool) (bool, error) {
 	p := getPaths()
 	snaps, err := snapshotManagedFiles()
 	if err != nil {
-		return err
+		return false, err
 	}
 	angieWasActive := isActive("angie")
 	blockyWasActive := isActive("blocky")
+	blockyTouched := false
 	rollback := func() {
 		_ = restoreManagedFiles(snaps)
-		restoreRuntime(stack, angieWasActive, blockyWasActive)
+		restoreRuntimeComponents(stack, true, blockyTouched, angieWasActive, blockyWasActive)
 	}
 
 	writes := []struct {
@@ -242,23 +322,24 @@ func applySyncCandidate(stack Stack, c *syncCandidate) error {
 	for _, item := range writes {
 		if err := writeAtomic(item.path, item.data, 0644); err != nil {
 			rollback()
-			return err
+			return false, err
 		}
 	}
 
 	if stack.Angie {
 		if err := reloadOrStartAngie(); err != nil {
 			rollback()
-			return fmt.Errorf("apply angie: %w", err)
+			return false, fmt.Errorf("apply angie: %w", err)
 		}
 	}
-	if stack.Blocky {
-		if err := serviceControl("blocky", "restart"); err != nil {
+	if stack.Blocky && (restartBlocky || !blockyWasActive) {
+		blockyTouched = true
+		if err := restartOrStartBlocky(); err != nil {
 			rollback()
-			return fmt.Errorf("apply blocky: %w", err)
+			return false, fmt.Errorf("apply blocky: %w", err)
 		}
 	}
-	return nil
+	return blockyTouched, nil
 }
 func syncFailure(err error) error {
 	if restoreErr := restoreAppliedConfig(); restoreErr != nil {
@@ -295,6 +376,20 @@ func syncAll() error {
 	if err != nil {
 		return syncFailure(err)
 	}
+	blockyChanged := false
+	blockyCertHash := ""
+	if stack.Blocky {
+		filesChanged, err := blockyFilesChanged(candidate)
+		if err != nil {
+			return syncFailure(err)
+		}
+		certChanged, hash, err := blockyCertificateChanged(cfg)
+		if err != nil {
+			return syncFailure(err)
+		}
+		blockyChanged = filesChanged || certChanged
+		blockyCertHash = hash
+	}
 	if err := saveConfig(cfg); err != nil {
 		return syncFailure(err)
 	}
@@ -313,14 +408,22 @@ func syncAll() error {
 			return syncFailure(fmt.Errorf("prepare certificate access: %w", err))
 		}
 	}
-	if err := applySyncCandidate(stack, candidate); err != nil {
+	blockyApplied, err := applySyncCandidate(stack, candidate, blockyChanged)
+	if err != nil {
 		return syncFailure(err)
 	}
 	if stack.Angie {
 		success("Angie configuration applied")
 	}
 	if stack.Blocky {
-		success("Blocky configuration applied")
+		if blockyApplied {
+			success("Blocky configuration applied")
+			if err := saveBlockyCertificateHash(blockyCertHash); err != nil {
+				warn("Could not save Blocky certificate state: %v", err)
+			}
+		} else {
+			info("Blocky configuration unchanged")
+		}
 	}
 	if err := saveAppliedConfig(cfg); err != nil {
 		warn("Could not save applied configuration snapshot: %v", err)

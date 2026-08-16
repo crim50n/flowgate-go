@@ -25,6 +25,19 @@ wait_active() {
     return 1
 }
 
+wait_new_blocky_pid() {
+    old_pid=$1
+    for _ in $(seq 1 50); do
+        pid=$(pgrep -x blocky | head -n1 || true)
+        if [ -n "$pid" ] && [ "$pid" != "$old_pid" ]; then
+            printf '%s\n' "$pid"
+            return 0
+        fi
+        sleep 0.1
+    done
+    return 1
+}
+
 CGO_ENABLED=0 go build -trimpath -buildvcs=false \
     -gcflags='all=-l' -ldflags="-s -w -buildid= -X main.version=${VERSION}" \
     -o /usr/bin/flowgate .
@@ -35,7 +48,7 @@ SUPERVISOR_PID=$!
 wait_active
 
 FLOWGATE_INTEGRATION=1 /tmp/flowgate-go.test -test.run \
-    '^(TestValidateAngieCandidateDoesNotTouchProduction|TestRestoreRuntimeWithNoInitSupervisor)$' -test.v
+    '^(TestValidateAngieCandidateDoesNotTouchProduction|TestRestoreRuntimeWithNoInitSupervisor|TestRestoreRuntimeSkipsUntouchedBlocky)$' -test.v
 angie -t
 blocky --config /etc/blocky/config.yml validate
 
@@ -45,6 +58,16 @@ wait "$p1"
 wait "$p2"
 grep -q 'race-a.example.com:' /etc/flowgate/flowgate.yaml
 grep -q 'race-b.example.com:' /etc/flowgate/flowgate.yaml
+wait_active
+
+blocky_pid=$(pgrep -x blocky | head -n1)
+for n in 1 2 3 4 5 6; do
+    flowgate service "service-${n}.example.com" "$((8000 + n))" >/tmp/service-${n}.log 2>&1
+    [ "$(pgrep -x blocky | head -n1)" = "$blocky_pid" ] || {
+        echo "Blocky restarted after service-only change" >&2
+        exit 1
+    }
+done
 wait_active
 
 flowgate dns dns.example.com
@@ -61,6 +84,32 @@ grep -Eq '^[[:space:]]+https: 8443$' /etc/blocky/config.yml
 grep -Eq '^[[:space:]]+tls: 853$' /etc/blocky/config.yml
 su-exec blocky test -r /var/lib/angie/acme/acme_dns_example_com/certificate.pem
 su-exec blocky test -r /var/lib/angie/acme/acme_dns_example_com/private.key
+
+blocky_pid=$(pgrep -x blocky | head -n1)
+for n in 7 8 9; do
+    flowgate service "tls-service-${n}.example.com" "$((8000 + n))" >/tmp/tls-service-${n}.log 2>&1
+    [ "$(pgrep -x blocky | head -n1)" = "$blocky_pid" ] || {
+        echo "Blocky restarted after TLS service-only change" >&2
+        exit 1
+    }
+done
+
+blocky_pid=$(pgrep -x blocky | head -n1)
+FLOWGATE_ROOT=/tmp/renewal-root PROXY_IP=203.0.113.10 flowgate init >/tmp/renewal-init.log 2>&1
+cp /tmp/renewal-root/etc/ssl/certs/ssl-cert-snakeoil.pem /var/lib/angie/acme/acme_dns_example_com/certificate.pem
+cp /tmp/renewal-root/etc/ssl/private/ssl-cert-snakeoil.key /var/lib/angie/acme/acme_dns_example_com/private.key
+flowgate sync >/tmp/renewal-sync.log 2>&1
+renewed_pid=$(wait_new_blocky_pid "$blocky_pid") || {
+    echo 'Blocky did not restart after certificate renewal' >&2
+    exit 1
+}
+wait_active
+flowgate sync >/tmp/renewal-noop.log 2>&1
+wait_active
+[ "$(pgrep -x blocky | head -n1)" = "$renewed_pid" ] || {
+    echo 'Blocky restarted again without a certificate change' >&2
+    exit 1
+}
 
 flowgate add geolocation-!cn
 wait_active

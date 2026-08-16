@@ -27,6 +27,7 @@ func getPaths() Paths {
 		AngieStream:   rooted("/etc/angie/stream.d/flowgate.conf"),
 		AngieHTTP:     rooted("/etc/angie/http.d/flowgate.conf"),
 		BlockyList:    rooted("/etc/blocky/flowgate.list"),
+		BlockyCertSum: filepath.Join(dataDir, "blocky-cert.sha256"),
 		DLC:           filepath.Join(dataDir, "dlc.dat"),
 		DLCSum:        filepath.Join(dataDir, "dlc.dat.sha256sum"),
 	}

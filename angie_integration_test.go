@@ -92,3 +92,25 @@ func TestRestoreRuntimeWithNoInitSupervisor(t *testing.T) {
 	}
 	t.Fatal("runtime rollback did not restore active Angie/Blocky processes")
 }
+
+func TestRestoreRuntimeSkipsUntouchedBlocky(t *testing.T) {
+	if os.Getenv("FLOWGATE_INTEGRATION") != "1" || !commandExists("angie") || !commandExists("blocky") {
+		t.Skip("requires Flowgate runtime integration container")
+	}
+	if detectInit() != "none" || !isActive("angie") || !isActive("blocky") {
+		t.Skip("requires active no-init runtime")
+	}
+	blockyPID, err := controlProcessPID("blocky")
+	if err != nil || blockyPID == 0 {
+		t.Fatalf("Blocky control PID: %d, %v", blockyPID, err)
+	}
+	restoreRuntimeComponents(Stack{Angie: true, Blocky: true}, true, false, true, true)
+	time.Sleep(200 * time.Millisecond)
+	newBlockyPID, err := controlProcessPID("blocky")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if newBlockyPID != blockyPID {
+		t.Fatalf("untouched Blocky restarted during rollback: %d -> %d", blockyPID, newBlockyPID)
+	}
+}
