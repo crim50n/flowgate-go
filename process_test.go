@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"syscall"
 	"testing"
 	"time"
@@ -84,5 +85,49 @@ func TestControlProcessPIDUsesExactExecutable(t *testing.T) {
 	}
 	if err := syscall.Kill(decoy.Process.Pid, 0); err != nil {
 		t.Fatalf("decoy was affected: %v", err)
+	}
+}
+
+func TestControlProcessPIDPrefersAngiePIDFile(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("FLOWGATE_ROOT", root)
+	testExe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "angie")
+	if err := copyExecutable(testExe, path); err != nil {
+		t.Fatal(err)
+	}
+	start := func() *exec.Cmd {
+		cmd := exec.Command(path, "-test.run=TestProcessHelper")
+		cmd.Env = append(os.Environ(), "FLOWGATE_PROCESS_HELPER=1")
+		if err := cmd.Start(); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = cmd.Process.Kill() })
+		return cmd
+	}
+	master := start()
+	_ = start() // Simulate an old/reparented Angie worker that also looks like a root process.
+
+	if err := os.MkdirAll(filepath.Join(root, "run"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	pidFile := filepath.Join(root, "run", "angie.pid")
+	if err := os.WriteFile(pidFile, []byte(strconv.Itoa(master.Process.Pid)+"\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		pid, err := controlProcessPID("angie")
+		if err == nil && pid == master.Process.Pid {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("Angie PID file was not preferred: pid=%d err=%v", pid, err)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }

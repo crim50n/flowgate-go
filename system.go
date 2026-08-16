@@ -157,7 +157,25 @@ func processParentPID(pid int) int {
 	return 0
 }
 
+func pidFileProcessPID(name string) (int, bool) {
+	if name != "angie" {
+		return 0, false
+	}
+	data, err := os.ReadFile(rooted("/run/angie.pid"))
+	if err != nil {
+		return 0, false
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil || pid <= 0 || !processMatchesName(pid, name) {
+		return 0, false
+	}
+	return pid, true
+}
+
 func controlProcessPID(name string) (int, error) {
+	if pid, ok := pidFileProcessPID(name); ok {
+		return pid, nil
+	}
 	pids := exactProcessPIDs(name)
 	if len(pids) == 0 {
 		return 0, nil
