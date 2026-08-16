@@ -38,6 +38,21 @@ wait_new_blocky_pid() {
     return 1
 }
 
+wait_stable_blocky_pid() {
+    for _ in $(seq 1 30); do
+        pid=$(pgrep -x blocky | head -n1 || true)
+        if [ -n "$pid" ]; then
+            sleep 1.2
+            if [ "$(pgrep -x blocky | head -n1 || true)" = "$pid" ]; then
+                printf '%s\n' "$pid"
+                return 0
+            fi
+        fi
+        sleep 0.1
+    done
+    return 1
+}
+
 CGO_ENABLED=0 go build -trimpath -buildvcs=false \
     -gcflags='all=-l' -ldflags="-s -w -buildid= -X main.version=${VERSION}" \
     -o /usr/bin/flowgate .
@@ -60,7 +75,7 @@ grep -q 'race-a.example.com:' /etc/flowgate/flowgate.yaml
 grep -q 'race-b.example.com:' /etc/flowgate/flowgate.yaml
 wait_active
 
-blocky_pid=$(pgrep -x blocky | head -n1)
+blocky_pid=$(wait_stable_blocky_pid)
 for n in 1 2 3 4 5 6; do
     flowgate service "service-${n}.example.com" "$((8000 + n))" >/tmp/service-${n}.log 2>&1
     [ "$(pgrep -x blocky | head -n1)" = "$blocky_pid" ] || {
@@ -85,7 +100,7 @@ grep -Eq '^[[:space:]]+tls: 853$' /etc/blocky/config.yml
 su-exec blocky test -r /var/lib/angie/acme/acme_dns_example_com/certificate.pem
 su-exec blocky test -r /var/lib/angie/acme/acme_dns_example_com/private.key
 
-blocky_pid=$(pgrep -x blocky | head -n1)
+blocky_pid=$(wait_stable_blocky_pid)
 for n in 7 8 9; do
     flowgate service "tls-service-${n}.example.com" "$((8000 + n))" >/tmp/tls-service-${n}.log 2>&1
     [ "$(pgrep -x blocky | head -n1)" = "$blocky_pid" ] || {
@@ -94,7 +109,7 @@ for n in 7 8 9; do
     }
 done
 
-blocky_pid=$(pgrep -x blocky | head -n1)
+blocky_pid=$(wait_stable_blocky_pid)
 FLOWGATE_ROOT=/tmp/renewal-root PROXY_IP=203.0.113.10 flowgate init >/tmp/renewal-init.log 2>&1
 cp /tmp/renewal-root/etc/ssl/certs/ssl-cert-snakeoil.pem /var/lib/angie/acme/acme_dns_example_com/certificate.pem
 cp /tmp/renewal-root/etc/ssl/private/ssl-cert-snakeoil.key /var/lib/angie/acme/acme_dns_example_com/private.key
