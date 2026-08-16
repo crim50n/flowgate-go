@@ -12,9 +12,9 @@ flowgate add category-dev
 flowgate add github
 ```
 
-Domains are matched together with their subdomains. GeoSite selectors keep the rule types stored in `dlc.dat` (`domain`, `full`, `keyword`, and `regexp`). Flowgate compiles the same rule set into Blocky and Angie so DNS interception and SNI routing stay aligned.
+Flowgate follows the original project's suffix-domain Smart DNS model: configured domains match both the domain itself and its subdomains. For GeoSite selectors, `domain` and `full` entries are normalized to that same suffix behavior. Blocky's `customDNS.mapping` returns the Flowgate IPv4 address for A queries and, with `filterUnmappedTypes: true`, returns NOERROR with an empty Answer for AAAA, HTTPS, SVCB, and other unmapped record types.
 
-Passthrough DNS uses Blocky's denylist response with `proxy_ip`: matching A queries return the Flowgate IPv4 address, matching AAAA queries return `::`, and other query types such as HTTPS/SVCB return NXDOMAIN. Blocky's normal CNAME/response matching semantics also apply.
+Blocky cannot represent DLC `regexp` or `keyword` rules in `customDNS.mapping`. Flowgate reports how many such rules are skipped for DNS interception; Angie can still use them for SNI matching if traffic reaches Flowgate directly.
 
 ```text
 Client -> Blocky -> Flowgate IP -> Angie :443 -> origin:443
@@ -60,7 +60,7 @@ flowgate sync
 flowgate version
 ```
 
-`add`, `service`, `dns`, and `remove` run synchronization immediately. Blocky is restarted only when its generated configuration, domain list, or TLS certificate changes, or when the service is not running; Angie keeps its normal validation and reload behavior.
+`add`, `service`, `dns`, and `remove` run synchronization immediately. Blocky is restarted only when its generated configuration or TLS certificate changes, or when the service is not running; Angie keeps its normal validation and reload behavior.
 
 `flowgate dns dns.example.com` records the primary DNS hostname and creates the Angie reverse-proxy route to Blocky's HTTPS endpoint. The hostname must resolve to the Flowgate server through authoritative DNS. On first setup, Angie must obtain the ACME certificate before Blocky can enable its own `https: 8443` and `tls: 853` listeners; the next `flowgate sync` after the certificate appears enables those listeners.
 

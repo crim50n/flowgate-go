@@ -32,7 +32,6 @@ type Paths struct {
 	AngieMain     string
 	AngieStream   string
 	AngieHTTP     string
-	BlockyList    string
 	BlockyCertSum string
 	DLC           string
 	DLCSum        string

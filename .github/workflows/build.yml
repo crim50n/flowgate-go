@@ -94,6 +94,24 @@ jobs:
             docker exec flowgate-integration flowgate service "service-${n}.example.com" "$((8000 + n))"
             test "$(docker exec flowgate-integration pgrep -x blocky | head -n1)" = "$blocky_pid"
           done
+      - name: Verify Smart DNS A/NODATA and TLS passthrough
+        run: |
+          docker exec flowgate-integration flowgate service app.smart-test.invalid 9000
+          docker exec flowgate-integration flowgate add example.com
+          stable_pid=""
+          for i in $(seq 1 30); do
+            pid1=$(docker exec flowgate-integration pgrep -x blocky | head -n1 || true)
+            sleep 1.2
+            pid2=$(docker exec flowgate-integration pgrep -x blocky | head -n1 || true)
+            if [ -n "$pid1" ] && [ "$pid1" = "$pid2" ]; then
+              stable_pid="$pid1"
+              break
+            fi
+          done
+          test -n "$stable_pid"
+          docker exec -e FLOWGATE_INTEGRATION=1 flowgate-integration \
+            /tmp/flowgate-go.test -test.run \
+            '^(TestSmartDNSResponseSemantics|TestSmartDNSTLSPassthrough)$' -test.v
       - name: Verify DNS TLS bootstrap
         run: |
           docker exec flowgate-integration flowgate dns dns.example.com
@@ -105,23 +123,43 @@ jobs:
             mkdir -p /var/lib/angie/acme/acme_dns_example_com &&
             cp /etc/ssl/certs/ssl-cert-snakeoil.pem /var/lib/angie/acme/acme_dns_example_com/certificate.pem &&
             cp /etc/ssl/private/ssl-cert-snakeoil.key /var/lib/angie/acme/acme_dns_example_com/private.key'
+          blocky_pid=$(docker exec flowgate-integration pgrep -x blocky | head -n1)
           docker exec flowgate-integration flowgate sync
-          active=0
-          status=""
-          for i in $(seq 1 30); do
-            status=$(docker exec flowgate-integration flowgate status 2>/dev/null || true)
-            active=$(printf '%s\n' "$status" | grep -c 'ACTIVE' || true)
-            if [ "$active" -ge 2 ] && ! printf '%s\n' "$status" | grep -q 'INACTIVE'; then
+          new_blocky_pid=""
+          for i in $(seq 1 50); do
+            pid=$(docker exec flowgate-integration pgrep -x blocky | head -n1 || true)
+            if [ -n "$pid" ] && [ "$pid" != "$blocky_pid" ]; then
+              new_blocky_pid="$pid"
               break
             fi
-            sleep 0.2
+            sleep 0.1
           done
-          [ "$active" -ge 2 ]
-          ! printf '%s\n' "$status" | grep -q 'INACTIVE'
+          test -n "$new_blocky_pid"
           docker exec flowgate-integration grep -Eq '^[[:space:]]+https: 8443$' /etc/blocky/config.yml
           docker exec flowgate-integration grep -Eq '^[[:space:]]+tls: 853$' /etc/blocky/config.yml
           docker exec flowgate-integration su-exec blocky test -r /var/lib/angie/acme/acme_dns_example_com/certificate.pem
           docker exec flowgate-integration su-exec blocky test -r /var/lib/angie/acme/acme_dns_example_com/private.key
+      - name: Verify Smart DNS over DoT
+        run: |
+          docker exec -e FLOWGATE_INTEGRATION=1 flowgate-integration \
+            /tmp/flowgate-go.test -test.run '^TestSmartDNSDoTResponseSemantics$' -test.v
+      - name: Verify category-ai Smart DNS
+        run: |
+          docker exec flowgate-integration flowgate add category-ai-!cn
+          stable_pid=""
+          for i in $(seq 1 30); do
+            pid1=$(docker exec flowgate-integration pgrep -x blocky | head -n1 || true)
+            sleep 1.2
+            pid2=$(docker exec flowgate-integration pgrep -x blocky | head -n1 || true)
+            if [ -n "$pid1" ] && [ "$pid1" = "$pid2" ]; then
+              stable_pid="$pid1"
+              break
+            fi
+          done
+          test -n "$stable_pid"
+          docker exec -e FLOWGATE_INTEGRATION=1 -e FLOWGATE_SMARTDNS_DOMAIN=chatgpt.com \
+            flowgate-integration /tmp/flowgate-go.test -test.run \
+            '^(TestSmartDNSResponseSemantics|TestSmartDNSTLSPassthrough|TestSmartDNSDoTResponseSemantics)$' -test.v
       - name: Verify TLS service changes do not restart Blocky
         run: |
           sleep 2

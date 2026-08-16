@@ -28,23 +28,22 @@ func testRules(t *testing.T) []ProxyRule {
 }
 
 func TestBlockyContainsOnlyProxyDomains(t *testing.T) {
-	list, err := renderBlockyProxyList(testRules(t))
-	if err != nil {
-		t.Fatal(err)
-	}
-	text := string(list)
-	if !strings.Contains(text, "*.external.example.com\n") {
-		t.Fatal("proxy domain missing from Blocky list")
-	}
-	if strings.Contains(text, "app.example.com") {
-		t.Fatal("service domain must not be written to Blocky list")
-	}
 	cfg, err := renderBlocky(testConfig(), testRules(t))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(cfg), "blockType: 203.0.113.10") {
-		t.Fatal("Blocky custom blockType missing")
+	text := string(cfg)
+	if !strings.Contains(text, "external.example.com: 203.0.113.10") {
+		t.Fatal("proxy domain missing from Blocky customDNS mapping")
+	}
+	if strings.Contains(text, "app.example.com: 203.0.113.10") {
+		t.Fatal("service domain must not be written to Blocky customDNS mapping")
+	}
+	if !strings.Contains(text, "filterUnmappedTypes: true") {
+		t.Fatal("Blocky must return NODATA for unmapped query types")
+	}
+	if strings.Contains(text, "blocking:") || strings.Contains(text, "blockType:") {
+		t.Fatal("Smart DNS must not use Blocky denylist sinkhole responses")
 	}
 }
 
@@ -79,25 +78,27 @@ func TestGeoRuleRendering(t *testing.T) {
 		{Type: RulePlain, Value: "keyword.example"},
 		{Type: RuleRegex, Value: `^node-[0-9]+\.example\.com$`},
 	}
-	list, err := renderBlockyProxyList(rules)
+	domains, unsupported := flowgateDNSDomains(rules)
+	if unsupported != 2 {
+		t.Fatalf("unsupported DNS rules = %d, want 2", unsupported)
+	}
+	if strings.Join(domains, ",") != "full.example,root.example" {
+		t.Fatalf("Blocky domains = %#v", domains)
+	}
+	cfg := &Config{Settings: Settings{ProxyIP: "203.0.113.10"}}
+	blocky, err := renderBlocky(cfg, rules)
 	if err != nil {
 		t.Fatal(err)
 	}
-	text := string(list)
-	for _, want := range []string{
-		"*.root.example",
-		"full.example",
-		`/keyword\.example/`,
-		`/^node-[0-9]+\.example\.com$/`,
-	} {
-		if !strings.Contains(text, want) {
-			t.Fatalf("Blocky list missing %q", want)
+	for _, want := range []string{"root.example: 203.0.113.10", "full.example: 203.0.113.10"} {
+		if !strings.Contains(string(blocky), want) {
+			t.Fatalf("Blocky mapping missing %q", want)
 		}
 	}
 	stream := renderAngieStream(&Config{}, rules)
 	for _, want := range []string{
 		".root.example $ssl_preread_server_name;",
-		"full.example $ssl_preread_server_name;",
+		".full.example $ssl_preread_server_name;",
 		angieRegexKey("~*", regexp.QuoteMeta("keyword.example")) + " $ssl_preread_server_name;",
 		angieRegexKey("~", `^node-[0-9]+\.example\.com$`) + " $ssl_preread_server_name;",
 	} {
@@ -179,5 +180,17 @@ func TestBlockyTLSEnabledAfterDNSCertificateExists(t *testing.T) {
 	}
 	if !strings.Contains(text, "certificate.pem") || !strings.Contains(text, "private.key") {
 		t.Fatal("Blocky certificate paths missing after certificate creation")
+	}
+}
+
+func TestAngiePassthroughListenerComesFirst(t *testing.T) {
+	stream := renderAngieStream(testConfig(), testRules(t))
+	passthrough := strings.Index(stream, "proxy_pass $flowgate_origin:443;")
+	service := strings.Index(stream, "server_name app.example.com;")
+	if passthrough < 0 || service < 0 {
+		t.Fatalf("missing passthrough or service listener:\n%s", stream)
+	}
+	if passthrough > service {
+		t.Fatal("service listener must not become the default stream server")
 	}
 }

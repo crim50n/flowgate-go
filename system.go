@@ -245,7 +245,6 @@ func backupConfigs() error {
 		path string
 	}{
 		{"blocky-config", p.Blocky},
-		{"blocky-list", p.BlockyList},
 		{"angie-main", p.AngieMain},
 		{"angie-stream", p.AngieStream},
 		{"angie-http", p.AngieHTTP},

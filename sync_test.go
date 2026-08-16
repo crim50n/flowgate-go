@@ -58,7 +58,7 @@ func TestRestoreManagedFilesRestoresAllSnapshots(t *testing.T) {
 	root := t.TempDir()
 	t.Setenv("FLOWGATE_ROOT", root)
 	p := getPaths()
-	paths := []string{p.Blocky, p.BlockyList, p.AngieStream, p.AngieHTTP}
+	paths := []string{p.Blocky, p.AngieStream, p.AngieHTTP}
 	for _, path := range paths {
 		if err := writeAtomic(path, []byte("old\n"), 0644); err != nil {
 			t.Fatal(err)

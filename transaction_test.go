@@ -17,23 +17,25 @@ func TestInitWithoutGeoSitesDoesNotRequireDLC(t *testing.T) {
 	}
 }
 
-func TestFailedAddRestoresConfig(t *testing.T) {
-	cfg := &Config{
+func TestApplyConfigRestoresConfigOnFailedSync(t *testing.T) {
+	old := &Config{
 		Settings: Settings{ProxyIP: "203.0.113.10"},
 		Domains:  map[string]Domain{"existing.example.com": {Type: "proxy"}},
 	}
-	setupTestRoot(t, cfg)
+	setupTestRoot(t, old)
 	p := getPaths()
 	if err := os.MkdirAll(p.DataDir, 0750); err != nil {
 		t.Fatal(err)
 	}
-	badDLC := buildTestDLC("CATEGORY-BAD", []ProxyRule{
-		{Type: RuleRegex, Value: `foo/bar`},
-	})
-	if err := os.WriteFile(p.DLC, badDLC, 0644); err != nil {
+	if err := os.WriteFile(p.DLC, []byte("not-a-protobuf"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	if err := cmdAdd([]string{"category-bad"}); err == nil {
+	candidate := &Config{
+		Settings: Settings{ProxyIP: "203.0.113.10"},
+		Domains:  map[string]Domain{},
+		GeoSites: []string{"category-bad"},
+	}
+	if err := applyConfig(candidate); err == nil {
 		t.Fatal("expected failed sync")
 	}
 	got, err := loadConfig()
@@ -41,7 +43,7 @@ func TestFailedAddRestoresConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(got.GeoSites) != 0 {
-		t.Fatalf("failed add persisted GeoSite: %#v", got.GeoSites)
+		t.Fatalf("failed config persisted GeoSite: %#v", got.GeoSites)
 	}
 	if _, ok := got.Domains["existing.example.com"]; !ok {
 		t.Fatal("previous config was not restored")
@@ -61,11 +63,10 @@ func TestFailedManualSyncRestoresAppliedConfig(t *testing.T) {
 	if err := saveAppliedConfig(good); err != nil {
 		t.Fatal(err)
 	}
-	badDLC := buildTestDLC("CATEGORY-BAD", []ProxyRule{{Type: RuleRegex, Value: `foo/bar`}})
 	if err := os.MkdirAll(p.DataDir, 0750); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(p.DLC, badDLC, 0644); err != nil {
+	if err := os.WriteFile(p.DLC, []byte("not-a-protobuf"), 0644); err != nil {
 		t.Fatal(err)
 	}
 	candidate := &Config{

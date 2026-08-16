@@ -85,6 +85,12 @@ for n in 1 2 3 4 5 6; do
 done
 wait_active
 
+flowgate service app.smart-test.invalid 9000 >/tmp/smart-service.log 2>&1
+flowgate add example.com >/tmp/smart-add.log 2>&1
+wait_stable_blocky_pid >/dev/null
+FLOWGATE_INTEGRATION=1 /tmp/flowgate-go.test -test.run \
+    '^(TestSmartDNSResponseSemantics|TestSmartDNSTLSPassthrough)$' -test.v
+
 flowgate dns dns.example.com
 if grep -Eq '^[[:space:]]+https: 8443$' /etc/blocky/config.yml; then
     echo 'Blocky HTTPS enabled before a certificate exists' >&2
@@ -93,12 +99,20 @@ fi
 mkdir -p /var/lib/angie/acme/acme_dns_example_com
 cp /etc/ssl/certs/ssl-cert-snakeoil.pem /var/lib/angie/acme/acme_dns_example_com/certificate.pem
 cp /etc/ssl/private/ssl-cert-snakeoil.key /var/lib/angie/acme/acme_dns_example_com/private.key
+blocky_pid=$(wait_stable_blocky_pid)
 flowgate sync
+wait_new_blocky_pid "$blocky_pid" >/dev/null
 wait_active
 grep -Eq '^[[:space:]]+https: 8443$' /etc/blocky/config.yml
 grep -Eq '^[[:space:]]+tls: 853$' /etc/blocky/config.yml
 su-exec blocky test -r /var/lib/angie/acme/acme_dns_example_com/certificate.pem
 su-exec blocky test -r /var/lib/angie/acme/acme_dns_example_com/private.key
+FLOWGATE_INTEGRATION=1 /tmp/flowgate-go.test -test.run '^TestSmartDNSDoTResponseSemantics$' -test.v
+
+flowgate add category-ai-!cn >/tmp/category-ai.log 2>&1
+wait_stable_blocky_pid >/dev/null
+FLOWGATE_INTEGRATION=1 FLOWGATE_SMARTDNS_DOMAIN=chatgpt.com /tmp/flowgate-go.test -test.run \
+    '^(TestSmartDNSResponseSemantics|TestSmartDNSTLSPassthrough|TestSmartDNSDoTResponseSemantics)$' -test.v
 
 blocky_pid=$(wait_stable_blocky_pid)
 for n in 7 8 9; do
@@ -130,6 +144,6 @@ flowgate add geolocation-!cn
 wait_active
 angie -t
 blocky --config /etc/blocky/config.yml validate
-rules=$(wc -l < /etc/blocky/flowgate.list)
-[ "$rules" -gt 20000 ]
-printf 'runtime integration: PASS (%s rules)\n' "$rules"
+domains=$(awk '/^    mapping:$/ { inmap=1; next } inmap && /^        [^[:space:]].*: / { count++; next } inmap && !/^        / { exit } END { print count+0 }' /etc/blocky/config.yml)
+[ "$domains" -gt 20000 ]
+printf 'runtime integration: PASS (%s Smart DNS domains)\n' "$domains"

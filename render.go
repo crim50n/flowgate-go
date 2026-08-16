@@ -36,35 +36,34 @@ func ensureProxyIP(cfg *Config) error {
 	return nil
 }
 
-func renderBlockyProxyList(rules []ProxyRule) ([]byte, error) {
-	var b strings.Builder
+func flowgateDNSDomains(rules []ProxyRule) ([]string, int) {
+	seen := make(map[string]struct{})
+	var domains []string
+	unsupported := 0
 	for _, rule := range rules {
 		switch rule.Type {
-		case RuleRootDomain:
-			fmt.Fprintf(&b, "*.%s\n", strings.ToLower(rule.Value))
-		case RuleFull:
-			fmt.Fprintf(&b, "%s\n", strings.ToLower(rule.Value))
-		case RulePlain:
-			fmt.Fprintf(&b, "/%s/\n", regexp.QuoteMeta(strings.ToLower(rule.Value)))
-		case RuleRegex:
-			if strings.Contains(rule.Value, "/") {
-				return nil, fmt.Errorf("geosite regex contains unsupported '/': %s", rule.Value)
+		case RuleRootDomain, RuleFull:
+			domain := strings.ToLower(rule.Value)
+			if _, ok := seen[domain]; !ok {
+				seen[domain] = struct{}{}
+				domains = append(domains, domain)
 			}
-			fmt.Fprintf(&b, "/%s/\n", rule.Value)
-		default:
-			return nil, fmt.Errorf("unsupported proxy rule type: %d", rule.Type)
+		case RulePlain, RuleRegex:
+			unsupported++
 		}
 	}
-	return []byte(b.String()), nil
+	sort.Strings(domains)
+	return domains, unsupported
 }
 
 func renderBlocky(cfg *Config, rules []ProxyRule) ([]byte, error) {
-	return renderBlockyWithListPath(cfg, rules, certRefPath(getPaths().BlockyList))
-}
-
-func renderBlockyWithListPath(cfg *Config, rules []ProxyRule, listPath string) ([]byte, error) {
 	if err := ensureProxyIP(cfg); err != nil {
 		return nil, err
+	}
+	mapping := make(map[string]string)
+	domains, _ := flowgateDNSDomains(rules)
+	for _, domain := range domains {
+		mapping[domain] = cfg.Settings.ProxyIP
 	}
 	out := map[string]interface{}{
 		"upstreams": map[string]interface{}{
@@ -75,18 +74,12 @@ func renderBlockyWithListPath(cfg *Config, rules []ProxyRule, listPath string) (
 				},
 			},
 		},
+		"customDNS": map[string]interface{}{
+			"filterUnmappedTypes": true,
+			"mapping":             mapping,
+		},
 		"ports": map[string]interface{}{"dns": 53, "http": 4000},
 		"log":   map[string]interface{}{"level": "info"},
-	}
-	if len(rules) > 0 {
-		out["blocking"] = map[string]interface{}{
-			"denylists": map[string]interface{}{
-				"flowgate": []string{listPath},
-			},
-			"clientGroupsBlock": map[string]interface{}{"default": []string{"flowgate"}},
-			"blockType":         cfg.Settings.ProxyIP,
-			"blockTTL":          "1m",
-		}
 	}
 	domain := dnsDomain(cfg)
 	if cert, key := certPaths(domain); cert != "" && key != "" {
@@ -105,25 +98,19 @@ func angieRegexKey(prefix, pattern string) string {
 
 func renderAngieStream(cfg *Config, rules []ProxyRule) string {
 	var b strings.Builder
-	rootDomains := make(map[string]struct{})
-	for _, rule := range rules {
-		if rule.Type == RuleRootDomain {
-			rootDomains[strings.ToLower(rule.Value)] = struct{}{}
-		}
-	}
+	suffixDomains := make(map[string]struct{})
 	b.WriteString("map $ssl_preread_server_name $flowgate_origin {\n")
 	b.WriteString("    hostnames;\n")
 	b.WriteString("    default \"\";\n")
 	for _, rule := range rules {
 		switch rule.Type {
-		case RuleRootDomain:
-			fmt.Fprintf(&b, "    .%s $ssl_preread_server_name;\n", strings.ToLower(rule.Value))
-		case RuleFull:
+		case RuleRootDomain, RuleFull:
 			value := strings.ToLower(rule.Value)
-			if _, covered := rootDomains[value]; covered {
+			if _, exists := suffixDomains[value]; exists {
 				continue
 			}
-			fmt.Fprintf(&b, "    %s $ssl_preread_server_name;\n", value)
+			suffixDomains[value] = struct{}{}
+			fmt.Fprintf(&b, "    .%s $ssl_preread_server_name;\n", value)
 		case RulePlain:
 			fmt.Fprintf(&b, "    %s $ssl_preread_server_name;\n", angieRegexKey("~*", regexp.QuoteMeta(rule.Value)))
 		case RuleRegex:
@@ -132,17 +119,18 @@ func renderAngieStream(cfg *Config, rules []ProxyRule) string {
 	}
 	b.WriteString("}\n\n")
 
-	services := sortedDomains(cfg, "service")
-	if len(services) > 0 {
-		b.WriteString("server {\n    listen 443;\n    listen [::]:443;\n")
-		fmt.Fprintf(&b, "    server_name %s;\n", strings.Join(services, " "))
-		b.WriteString("    proxy_pass 127.0.0.1:44301;\n    ssl_preread on;\n}\n\n")
-	}
 	b.WriteString("server {\n")
 	b.WriteString("    listen 443;\n    listen [::]:443;\n")
 	b.WriteString("    proxy_pass $flowgate_origin:443;\n")
 	b.WriteString("    ssl_preread on;\n")
 	b.WriteString("}\n")
+
+	services := sortedDomains(cfg, "service")
+	if len(services) > 0 {
+		b.WriteString("\nserver {\n    listen 443;\n    listen [::]:443;\n")
+		fmt.Fprintf(&b, "    server_name %s;\n", strings.Join(services, " "))
+		b.WriteString("    proxy_pass 127.0.0.1:44301;\n    ssl_preread on;\n}\n")
+	}
 	return b.String()
 }
 

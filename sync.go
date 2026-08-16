@@ -11,7 +11,6 @@ import (
 
 type syncCandidate struct {
 	blockyConfig []byte
-	blockyList   []byte
 	angieStream  []byte
 	angieHTTP    []byte
 }
@@ -51,43 +50,26 @@ func restoreSnapshot(s fileSnapshot) error {
 }
 
 func buildSyncCandidate(cfg *Config, rules []ProxyRule) (*syncCandidate, error) {
-	listData, err := renderBlockyProxyList(rules)
-	if err != nil {
-		return nil, err
-	}
 	configData, err := renderBlocky(cfg, rules)
 	if err != nil {
 		return nil, err
 	}
 	return &syncCandidate{
 		blockyConfig: configData,
-		blockyList:   listData,
 		angieStream:  []byte(renderAngieStream(cfg, rules)),
 		angieHTTP:    []byte(renderAngieHTTP(cfg)),
 	}, nil
 }
 
 func blockyFilesChanged(c *syncCandidate) (bool, error) {
-	p := getPaths()
-	for _, item := range []struct {
-		path string
-		data []byte
-	}{
-		{p.Blocky, c.blockyConfig},
-		{p.BlockyList, c.blockyList},
-	} {
-		current, err := os.ReadFile(item.path)
-		if os.IsNotExist(err) {
-			return true, nil
-		}
-		if err != nil {
-			return false, err
-		}
-		if !bytes.Equal(current, item.data) {
-			return true, nil
-		}
+	current, err := os.ReadFile(getPaths().Blocky)
+	if os.IsNotExist(err) {
+		return true, nil
 	}
-	return false, nil
+	if err != nil {
+		return false, err
+	}
+	return !bytes.Equal(current, c.blockyConfig), nil
 }
 
 func blockyCertificateHash(cfg *Config) (string, error) {
@@ -131,7 +113,7 @@ func saveBlockyCertificateHash(hash string) error {
 	}
 	return writeAtomic(path, []byte(hash+"\n"), 0640)
 }
-func validateBlockyCandidate(cfg *Config, rules []ProxyRule, listData []byte) error {
+func validateBlockyCandidate(c *syncCandidate) error {
 	if root := os.Getenv("FLOWGATE_ROOT"); root != "" && root != "/" {
 		return nil
 	}
@@ -143,16 +125,8 @@ func validateBlockyCandidate(cfg *Config, rules []ProxyRule, listData []byte) er
 		return err
 	}
 	defer os.RemoveAll(dir)
-	listPath := filepath.Join(dir, "flowgate.list")
 	configPath := filepath.Join(dir, "config.yml")
-	if err := os.WriteFile(listPath, listData, 0644); err != nil {
-		return err
-	}
-	configData, err := renderBlockyWithListPath(cfg, rules, listPath)
-	if err != nil {
-		return err
-	}
-	if err := os.WriteFile(configPath, configData, 0644); err != nil {
+	if err := os.WriteFile(configPath, c.blockyConfig, 0644); err != nil {
 		return err
 	}
 	stdout, stderr, code, runErr := run("blocky", "--config", configPath, "validate")
@@ -246,7 +220,7 @@ func reloadOrStartAngie() error {
 }
 func snapshotManagedFiles() ([]fileSnapshot, error) {
 	p := getPaths()
-	paths := []string{p.Blocky, p.BlockyList, p.AngieStream, p.AngieHTTP}
+	paths := []string{p.Blocky, p.AngieStream, p.AngieHTTP}
 	out := make([]fileSnapshot, 0, len(paths))
 	for _, path := range paths {
 		snap, err := snapshotFile(path)
@@ -314,7 +288,6 @@ func applySyncCandidate(stack Stack, c *syncCandidate, restartBlocky bool) (bool
 		path string
 		data []byte
 	}{
-		{p.BlockyList, c.blockyList},
 		{p.Blocky, c.blockyConfig},
 		{p.AngieStream, c.angieStream},
 		{p.AngieHTTP, c.angieHTTP},
@@ -372,6 +345,9 @@ func syncAll() error {
 	if err != nil {
 		return syncFailure(err)
 	}
+	if _, unsupported := flowgateDNSDomains(rules); unsupported > 0 {
+		warn("Blocky customDNS skips %d GeoSite regexp/keyword rules; suffix and full domain rules remain active", unsupported)
+	}
 	candidate, err := buildSyncCandidate(cfg, rules)
 	if err != nil {
 		return syncFailure(err)
@@ -394,7 +370,7 @@ func syncAll() error {
 		return syncFailure(err)
 	}
 	if stack.Blocky {
-		if err := validateBlockyCandidate(cfg, rules, candidate.blockyList); err != nil {
+		if err := validateBlockyCandidate(candidate); err != nil {
 			return syncFailure(err)
 		}
 	}

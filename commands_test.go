@@ -103,12 +103,12 @@ func TestAddGeoSiteCompilesRules(t *testing.T) {
 	if len(got.GeoSites) != 1 || got.GeoSites[0] != "category-test" {
 		t.Fatalf("geosites = %#v", got.GeoSites)
 	}
-	list, err := os.ReadFile(filepath.Join(root, "etc/blocky/flowgate.list"))
+	blocky, err := os.ReadFile(filepath.Join(root, "etc/blocky/config.yml"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(list), "*.example.com") || !strings.Contains(string(list), "full.example.net") {
-		t.Fatal("GeoSite rules missing from Blocky list")
+	if !strings.Contains(string(blocky), "example.com: 203.0.113.10") || !strings.Contains(string(blocky), "full.example.net: 203.0.113.10") {
+		t.Fatal("GeoSite domains missing from Blocky customDNS mapping")
 	}
 	stream, err := os.ReadFile(filepath.Join(root, "etc/angie/stream.d/flowgate.conf"))
 	if err != nil {

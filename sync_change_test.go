@@ -8,17 +8,8 @@ import (
 
 func writeBlockyCandidateFiles(t *testing.T, c *syncCandidate) {
 	t.Helper()
-	p := getPaths()
-	for _, item := range []struct {
-		path string
-		data []byte
-	}{
-		{p.Blocky, c.blockyConfig},
-		{p.BlockyList, c.blockyList},
-	} {
-		if err := writeAtomic(item.path, item.data, 0644); err != nil {
-			t.Fatal(err)
-		}
+	if err := writeAtomic(getPaths().Blocky, c.blockyConfig, 0644); err != nil {
+		t.Fatal(err)
 	}
 }
 
