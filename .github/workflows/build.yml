@@ -106,14 +106,22 @@ jobs:
             cp /etc/ssl/certs/ssl-cert-snakeoil.pem /var/lib/angie/acme/acme_dns_example_com/certificate.pem &&
             cp /etc/ssl/private/ssl-cert-snakeoil.key /var/lib/angie/acme/acme_dns_example_com/private.key'
           docker exec flowgate-integration flowgate sync
+          active=0
+          status=""
+          for i in $(seq 1 30); do
+            status=$(docker exec flowgate-integration flowgate status 2>/dev/null || true)
+            active=$(printf '%s\n' "$status" | grep -c 'ACTIVE' || true)
+            if [ "$active" -ge 2 ] && ! printf '%s\n' "$status" | grep -q 'INACTIVE'; then
+              break
+            fi
+            sleep 0.2
+          done
+          [ "$active" -ge 2 ]
+          ! printf '%s\n' "$status" | grep -q 'INACTIVE'
           docker exec flowgate-integration grep -Eq '^[[:space:]]+https: 8443$' /etc/blocky/config.yml
           docker exec flowgate-integration grep -Eq '^[[:space:]]+tls: 853$' /etc/blocky/config.yml
           docker exec flowgate-integration su-exec blocky test -r /var/lib/angie/acme/acme_dns_example_com/certificate.pem
           docker exec flowgate-integration su-exec blocky test -r /var/lib/angie/acme/acme_dns_example_com/private.key
-          status=$(docker exec flowgate-integration flowgate status)
-          active=$(printf '%s\n' "$status" | grep -c 'ACTIVE' || true)
-          [ "$active" -ge 2 ]
-          ! printf '%s\n' "$status" | grep -q 'INACTIVE'
       - name: Verify TLS service changes do not restart Blocky
         run: |
           sleep 2
