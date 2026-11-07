@@ -17,7 +17,7 @@ func setupTestRoot(t *testing.T, cfg *Config) string {
 	return root
 }
 
-func TestDNSConvertsExistingProxyToService(t *testing.T) {
+func TestDNSReplaceExistingProxyWithService(t *testing.T) {
 	cfg := &Config{
 		Settings: Settings{ProxyIP: "203.0.113.10"},
 		Domains: map[string]Domain{
@@ -25,14 +25,14 @@ func TestDNSConvertsExistingProxyToService(t *testing.T) {
 		},
 	}
 	root := setupTestRoot(t, cfg)
-	if err := cmdDNS([]string{"dns.example.com"}); err != nil {
+	if err := cmdDNS([]string{"set", "dns.example.com", "--replace"}); err != nil {
 		t.Fatal(err)
 	}
 	got, err := loadConfig()
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := Domain{Type: "service", IP: "127.0.0.1", Port: 8443}
+	want := Domain{Type: "service", IP: "127.0.0.1", Port: 8443, ManagedBy: "dns"}
 	if got.Domains["dns.example.com"] != want {
 		t.Fatalf("dns domain = %#v, want %#v", got.Domains["dns.example.com"], want)
 	}

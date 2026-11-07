@@ -56,7 +56,32 @@ func flowgateDNSDomains(rules []ProxyRule) ([]string, int) {
 	return domains, unsupported
 }
 
+func validateServiceProxyConflicts(cfg *Config, rules []ProxyRule) error {
+	suffixes := make(map[string]struct{})
+	for _, rule := range rules {
+		if rule.Type == RuleRootDomain || rule.Type == RuleFull {
+			suffixes[strings.ToLower(rule.Value)] = struct{}{}
+		}
+	}
+	for _, service := range sortedDomains(cfg, "service") {
+		for domain := strings.ToLower(service); domain != ""; {
+			if _, exists := suffixes[domain]; exists {
+				return fmt.Errorf("service %q is covered by proxy suffix %q; remove the overlapping proxy domain or GeoSite selector", service, domain)
+			}
+			dot := strings.IndexByte(domain, '.')
+			if dot < 0 {
+				break
+			}
+			domain = domain[dot+1:]
+		}
+	}
+	return nil
+}
+
 func renderBlocky(cfg *Config, rules []ProxyRule) ([]byte, error) {
+	if err := validateServiceProxyConflicts(cfg, rules); err != nil {
+		return nil, err
+	}
 	if err := ensureProxyIP(cfg); err != nil {
 		return nil, err
 	}

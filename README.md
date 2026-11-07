@@ -37,13 +37,13 @@ Flowgate stores Domain List Community data at:
 
 ## Reverse proxy
 
-`flowgate service app.example.com 8080` configures Angie to terminate TLS and proxy the request to the backend:
+`flowgate service app.example.net 8080` configures Angie to terminate TLS and proxy the request to the backend:
 
 ```text
 Client -> authoritative DNS -> Flowgate IP -> Angie -> backend
 ```
 
-Service domains are not written to Blocky. Point your own domain to Flowgate in authoritative DNS, typically with a wildcard record such as `*.example.com A <FLOWGATE_IP>`.
+Service domains are not written to Blocky. Point your own domain to Flowgate in authoritative DNS, typically with a wildcard record such as `*.example.net A <FLOWGATE_IP>`.
 
 ## CLI
 
@@ -52,7 +52,9 @@ flowgate init
 flowgate doctor [-v|--verbose]
 flowgate add DOMAIN|GEOSITE [DOMAIN|GEOSITE...]
 flowgate service DOMAIN PORT [--ip IP]
-flowgate dns DOMAIN
+flowgate dns set DOMAIN [--replace]
+flowgate check DOMAIN
+flowgate explain DOMAIN
 flowgate remove DOMAIN|GEOSITE [DOMAIN|GEOSITE...]
 flowgate status
 flowgate update
@@ -62,7 +64,30 @@ flowgate version
 
 `add`, `service`, `dns`, and `remove` run synchronization immediately. Blocky is restarted only when its generated configuration or TLS certificate changes, or when the service is not running; Angie keeps its normal validation and reload behavior.
 
-`flowgate dns dns.example.com` records the primary DNS hostname and creates the Angie reverse-proxy route to Blocky's HTTPS endpoint. The hostname must resolve to the Flowgate server through authoritative DNS. On first setup, Angie must obtain the ACME certificate before Blocky can enable its own `https: 8443` and `tls: 853` listeners; the next `flowgate sync` after the certificate appears enables those listeners.
+### DNS endpoint configuration
+
+`flowgate dns set dns.example.net` records the primary DNS hostname and creates the Angie reverse-proxy route to Blocky's HTTPS endpoint. This is a configuration command. The legacy `flowgate dns DOMAIN` spelling remains supported and prints a warning directing diagnostic use to `flowgate check`.
+
+New routes created by this command carry `managed_by: dns` in their domain entry. Changing the primary hostname removes previous DNS-managed routes. Existing user-managed services, including unmarked routes from older releases, are preserved; remove an obsolete legacy alias explicitly with `flowgate remove OLD_DOMAIN`. Selecting an existing service already pointing to local Blocky does not take ownership of it. Replacing a different proxy or service route requires `--replace`. A primary DNS backend cannot be repurposed with `flowgate service` until another primary hostname is selected or the old endpoint is removed.
+
+The hostname must resolve to the Flowgate server through authoritative DNS. On first setup, Angie must obtain the ACME certificate before Blocky can enable its own `https: 8443` and `tls: 853` listeners; the next `flowgate sync` after the certificate appears enables those listeners. Legacy automatic hostname inference applies only when there is exactly one `dns.` or `doh.` service pointing to local Blocky; otherwise configure the primary hostname explicitly.
+
+### Read-only domain diagnostics
+
+```bash
+flowgate check tbank.ru
+flowgate explain paypal.com
+```
+
+Both commands inspect the existing configuration and local DLC database. They show whether Blocky rewrites DNS, which Angie route would apply, and the matching explicit domains or configured GeoSite selectors. The DLC database contains expanded rules, so the output names configured selectors rather than inventing an include hierarchy. Regex and keyword rules are identified as SNI-only; PCRE expressions that the diagnostic cannot evaluate are reported as unknown.
+
+These commands do not initialize configuration, acquire a write lock, download data, query DNS, or restart services. A missing database is an error instead of an apparent direct route. The output describes configuration, not the applied runtime, the client's VPN routing, or application connectivity.
+
+### Conflicting routes
+
+Synchronization rejects a proxy or GeoSite suffix that also covers a configured service. For example, proxying `example.com` while serving `app.example.com` would otherwise make Blocky rewrite a service domain that should use authoritative DNS. Remove the overlapping domain or selector before retrying. Service domains remain absent from Blocky's mappings.
+
+Domain names are matched case insensitively, and ambiguous duplicate names are rejected. Service hostnames that collapse to the same legacy ACME client name, such as `app-example.com` and `app.example.com`, are rejected before applying configuration. Existing certificate directory names are preserved; choose noncolliding service hostnames. Proxy and backend IP addresses must use IPv4 notation.
 
 ## Configuration
 
@@ -88,11 +113,11 @@ GeoSite selectors are stored as selectors, not expanded into the YAML file. They
 Release versions come from Git tags in the form `vX.Y.Z`. Untagged builds report `dev` from `flowgate version`. For a local release-like build before tagging, pass the version explicitly:
 
 ```bash
-make VERSION=1.0.0 build
+make VERSION=1.1.0 build
 ./flowgate version
 ```
 
-Release notes are stored separately in `release-notes/<version>.md`. The current release notes are `release-notes/1.0.0.md`. A tagged release requires the matching notes file; the workflow builds versioned amd64/arm64 binaries and uses that file as the GitHub Release description.
+Release notes are stored separately in `release-notes/<version>.md`. The current release notes are `release-notes/1.1.0.md`. A tagged release requires the matching notes file; the workflow builds versioned amd64/arm64 binaries and uses that file as the GitHub Release description.
 
 ## Build and tests
 

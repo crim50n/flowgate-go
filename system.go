@@ -253,6 +253,10 @@ func detectStack() Stack {
 }
 
 func backupConfigs() error {
+	return backupConfigsWithConfigSnapshot(nil)
+}
+
+func backupConfigsWithConfigSnapshot(configBefore *fileSnapshot) error {
 	p := getPaths()
 	if err := os.MkdirAll(p.BackupDir, 0750); err != nil {
 		return err
@@ -269,12 +273,21 @@ func backupConfigs() error {
 		{"flowgate-config", p.ConfigFile},
 	}
 	for _, file := range files {
-		if !fileExists(file.path) {
-			continue
-		}
 		dst := filepath.Join(p.BackupDir, file.name+"_"+stamp+".bak")
-		if err := copyFile(file.path, dst); err != nil {
-			return err
+		if file.path == p.ConfigFile && configBefore != nil {
+			if !configBefore.exists {
+				continue
+			}
+			if err := writeAtomic(dst, configBefore.data, configBefore.mode); err != nil {
+				return err
+			}
+		} else {
+			if !fileExists(file.path) {
+				continue
+			}
+			if err := copyFile(file.path, dst); err != nil {
+				return err
+			}
 		}
 		matches, _ := filepath.Glob(filepath.Join(p.BackupDir, file.name+"_*.bak"))
 		sort.Strings(matches)

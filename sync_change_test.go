@@ -31,7 +31,7 @@ func TestServiceChangeDoesNotChangeBlockyCandidate(t *testing.T) {
 	}
 	writeBlockyCandidateFiles(t, candidate)
 
-	base.Domains["app.example.com"] = Domain{Type: "service", IP: "127.0.0.1", Port: 8080}
+	base.Domains["app.example.net"] = Domain{Type: "service", IP: "127.0.0.1", Port: 8080}
 	rules, err = resolveProxyRules(base)
 	if err != nil {
 		t.Fatal(err)

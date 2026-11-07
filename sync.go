@@ -220,7 +220,10 @@ func reloadOrStartAngie() error {
 }
 func snapshotManagedFiles() ([]fileSnapshot, error) {
 	p := getPaths()
-	paths := []string{p.Blocky, p.AngieStream, p.AngieHTTP}
+	paths := []string{
+		p.Blocky, p.AngieMain, p.AngieStream, p.AngieHTTP,
+		filepath.Join(filepath.Dir(p.AngieStream), "example.conf"),
+	}
 	out := make([]fileSnapshot, 0, len(paths))
 	for _, path := range paths {
 		snap, err := snapshotFile(path)
@@ -235,32 +238,50 @@ func snapshotManagedFiles() ([]fileSnapshot, error) {
 func restoreManagedFiles(snaps []fileSnapshot) error {
 	var first error
 	for _, snap := range snaps {
-		if err := restoreSnapshot(snap); err != nil && first == nil {
-			first = err
+		if err := restoreSnapshot(snap); err != nil {
+			err = fmt.Errorf("restore %s: %w", snap.path, err)
+			if first == nil {
+				first = err
+			} else {
+				first = fmt.Errorf("%w; %v", first, err)
+			}
 		}
 	}
 	return first
 }
 
-func restoreRuntime(stack Stack, angieWasActive, blockyWasActive bool) {
-	restoreRuntimeComponents(stack, true, true, angieWasActive, blockyWasActive)
+func restoreRuntime(stack Stack, angieWasActive, blockyWasActive bool) error {
+	return restoreRuntimeComponents(stack, true, true, angieWasActive, blockyWasActive)
 }
 
-func restoreRuntimeComponents(stack Stack, restoreAngie, restoreBlocky, angieWasActive, blockyWasActive bool) {
+func restoreRuntimeComponents(stack Stack, restoreAngie, restoreBlocky, angieWasActive, blockyWasActive bool) error {
+	var result error
+	addError := func(name string, err error) {
+		if err == nil {
+			return
+		}
+		err = fmt.Errorf("restore %s runtime: %w", name, err)
+		if result == nil {
+			result = err
+		} else {
+			result = fmt.Errorf("%w; %v", result, err)
+		}
+	}
 	if stack.Angie && restoreAngie {
 		if angieWasActive {
-			_ = serviceControl("angie", "reload")
+			addError("angie", reloadOrStartAngie())
 		} else if isActive("angie") {
-			_ = serviceControl("angie", "stop")
+			addError("angie", serviceControl("angie", "stop"))
 		}
 	}
 	if stack.Blocky && restoreBlocky {
 		if blockyWasActive {
-			_ = serviceControl("blocky", "restart")
+			addError("blocky", restartOrStartBlocky())
 		} else if isActive("blocky") {
-			_ = serviceControl("blocky", "stop")
+			addError("blocky", serviceControl("blocky", "stop"))
 		}
 	}
+	return result
 }
 
 func restartOrStartBlocky() error {
@@ -270,18 +291,19 @@ func restartOrStartBlocky() error {
 	return serviceControl("blocky", "start")
 }
 
-func applySyncCandidate(stack Stack, c *syncCandidate, restartBlocky bool) (bool, error) {
+func applySyncCandidate(stack Stack, c *syncCandidate, restartBlocky bool, snaps []fileSnapshot) (bool, error) {
 	p := getPaths()
-	snaps, err := snapshotManagedFiles()
-	if err != nil {
-		return false, err
-	}
 	angieWasActive := isActive("angie")
 	blockyWasActive := isActive("blocky")
 	blockyTouched := false
-	rollback := func() {
-		_ = restoreManagedFiles(snaps)
-		restoreRuntimeComponents(stack, true, blockyTouched, angieWasActive, blockyWasActive)
+	rollback := func(cause error) error {
+		if err := restoreManagedFiles(snaps); err != nil {
+			cause = fmt.Errorf("%w; rollback configuration: %v", cause, err)
+		}
+		if err := restoreRuntimeComponents(stack, true, blockyTouched, angieWasActive, blockyWasActive); err != nil {
+			cause = fmt.Errorf("%w; rollback runtime: %v", cause, err)
+		}
+		return cause
 	}
 
 	writes := []struct {
@@ -294,22 +316,19 @@ func applySyncCandidate(stack Stack, c *syncCandidate, restartBlocky bool) (bool
 	}
 	for _, item := range writes {
 		if err := writeAtomic(item.path, item.data, 0644); err != nil {
-			rollback()
-			return false, err
+			return false, rollback(err)
 		}
 	}
 
 	if stack.Angie {
 		if err := reloadOrStartAngie(); err != nil {
-			rollback()
-			return false, fmt.Errorf("apply angie: %w", err)
+			return false, rollback(fmt.Errorf("apply angie: %w", err))
 		}
 	}
 	if stack.Blocky && (restartBlocky || !blockyWasActive) {
 		blockyTouched = true
 		if err := restartOrStartBlocky(); err != nil {
-			rollback()
-			return false, fmt.Errorf("apply blocky: %w", err)
+			return false, rollback(fmt.Errorf("apply blocky: %w", err))
 		}
 	}
 	return blockyTouched, nil
@@ -322,15 +341,33 @@ func syncFailure(err error) error {
 }
 
 func syncAll() error {
+	return syncAllWithConfigSnapshot(nil)
+}
+
+// configBefore preserves the CLI command's input in the same backup generation
+// as the generated files. Manual sync backs up the current on-disk input instead.
+func syncAllWithConfigSnapshot(configBefore *fileSnapshot) (resultErr error) {
 	stack := detectStack()
 	header("Syncing Configuration (Proxy: ANGIE, DNS: BLOCKY)")
 	if !stack.Angie && !stack.Blocky {
 		warn("Angie and Blocky are not installed or running. Nothing to sync.")
 		return nil
 	}
-	if err := backupConfigs(); err != nil {
+	if err := backupConfigsWithConfigSnapshot(configBefore); err != nil {
 		return syncFailure(fmt.Errorf("backup: %w", err))
 	}
+	snaps, err := snapshotManagedFiles()
+	if err != nil {
+		return syncFailure(err)
+	}
+	applyStarted := false
+	defer func() {
+		if resultErr != nil && !applyStarted {
+			if err := restoreManagedFiles(snaps); err != nil {
+				resultErr = fmt.Errorf("%w; rollback configuration: %v", resultErr, err)
+			}
+		}
+	}()
 	if err := ensureEnvironment(); err != nil {
 		return syncFailure(err)
 	}
@@ -384,7 +421,8 @@ func syncAll() error {
 			return syncFailure(fmt.Errorf("prepare certificate access: %w", err))
 		}
 	}
-	blockyApplied, err := applySyncCandidate(stack, candidate, blockyChanged)
+	applyStarted = true
+	blockyApplied, err := applySyncCandidate(stack, candidate, blockyChanged, snaps)
 	if err != nil {
 		return syncFailure(err)
 	}

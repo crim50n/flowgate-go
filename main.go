@@ -13,7 +13,9 @@ Usage:
   flowgate doctor [-v|--verbose]
   flowgate add DOMAIN|GEOSITE [DOMAIN|GEOSITE...]
   flowgate service DOMAIN PORT [--ip IP]
-  flowgate dns DOMAIN
+  flowgate dns set DOMAIN [--replace]
+  flowgate check DOMAIN
+  flowgate explain DOMAIN
   flowgate remove DOMAIN|GEOSITE [DOMAIN|GEOSITE...]
   flowgate status
   flowgate update
@@ -21,6 +23,8 @@ Usage:
   flowgate version
 
 Commands add, service, dns and remove automatically run sync.
+check and explain are read-only and show configured routing, not live connectivity.
+The legacy dns DOMAIN syntax is supported but changes configuration.
 GeoSite selectors are resolved from the locally stored dlc.dat.`)
 }
 
@@ -51,6 +55,8 @@ func main() {
 		err = cmdService(os.Args[2:])
 	case "dns":
 		err = cmdDNS(os.Args[2:])
+	case "check", "explain":
+		err = cmdCheck(os.Args[2:])
 	case "remove":
 		err = cmdRemove(os.Args[2:])
 	case "status":

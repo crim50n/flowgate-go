@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -21,7 +22,7 @@ func validIP(s string) bool {
 		return true
 	}
 	ip := net.ParseIP(s)
-	return ip != nil && strings.Contains(s, ".")
+	return ip != nil && ip.To4() != nil && !strings.Contains(s, ":")
 }
 func validPort(p int) bool { return p >= 1 && p <= 65535 }
 
@@ -40,13 +41,26 @@ func validateConfig(cfg *Config) error {
 		}
 		seenGeoSites[name] = struct{}{}
 	}
-	for domain, entry := range cfg.Domains {
+	seenDomains := make(map[string]string, len(cfg.Domains))
+	seenACMENames := make(map[string]string)
+	for _, domain := range sortedDomainNames(cfg) {
+		entry := cfg.Domains[domain]
+		canonical := strings.ToLower(domain)
+		if previous, exists := seenDomains[canonical]; exists {
+			return fmt.Errorf("duplicate domain names differing only by case: %s and %s", previous, domain)
+		}
+		seenDomains[canonical] = domain
 		if !validDomain(domain) {
 			return fmt.Errorf("invalid domain: %s", domain)
 		}
 		switch entry.Type {
 		case "proxy":
 		case "service":
+			name := acmeName(canonical)
+			if previous, exists := seenACMENames[name]; exists {
+				return fmt.Errorf("service domains %s and %s share ACME client acme_%s; choose noncolliding service hostnames", previous, domain, name)
+			}
+			seenACMENames[name] = domain
 			if !validPort(entry.Port) {
 				return fmt.Errorf("invalid service port for %s: %d", domain, entry.Port)
 			}
@@ -56,12 +70,15 @@ func validateConfig(cfg *Config) error {
 		default:
 			return fmt.Errorf("invalid type for %s: %q", domain, entry.Type)
 		}
+		if entry.ManagedBy != "" && (entry.ManagedBy != "dns" || !isBlockyService(entry)) {
+			return fmt.Errorf("invalid managed_by for %s: only a local Blocky service may be managed by dns", domain)
+		}
 	}
 	if d := cfg.Settings.DNSDomain; d != "" {
 		if !validDomain(d) {
 			return fmt.Errorf("invalid settings.dns_domain: %s", d)
 		}
-		entry, ok := cfg.Domains[d]
+		entry, ok := cfg.Domains[seenDomains[strings.ToLower(d)]]
 		if !ok || entry.Type != "service" {
 			return fmt.Errorf("settings.dns_domain must reference a service domain: %s", d)
 		}
@@ -81,7 +98,7 @@ func detectPublicIP() (string, error) {
 		_ = resp.Body.Close()
 		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 			v := strings.TrimSpace(string(b[:n]))
-			if net.ParseIP(v) != nil {
+			if v != "" && validIP(v) {
 				return v, nil
 			}
 		}
@@ -108,8 +125,22 @@ func loadConfig() (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
+	return decodeConfig(b)
+}
+
+// loadExistingConfig never initializes files or probes the network.
+func loadExistingConfig() (*Config, error) {
+	path := getPaths().ConfigFile
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read config %s: %w", path, err)
+	}
+	return decodeConfig(data)
+}
+
+func decodeConfig(data []byte) (*Config, error) {
 	cfg := &Config{}
-	if err = yaml.Unmarshal(b, cfg); err != nil {
+	if err := yaml.Unmarshal(data, cfg); err != nil {
 		return nil, err
 	}
 	if cfg.Domains == nil {
@@ -121,7 +152,26 @@ func loadConfig() (*Config, error) {
 	if err := validateConfig(cfg); err != nil {
 		return nil, fmt.Errorf("invalid config: %w", err)
 	}
+	canonical := make(map[string]Domain, len(cfg.Domains))
+	for domain, entry := range cfg.Domains {
+		canonical[strings.ToLower(domain)] = entry
+	}
+	cfg.Domains = canonical
+	cfg.Settings.DNSDomain = strings.ToLower(cfg.Settings.DNSDomain)
 	return cfg, nil
+}
+
+func sortedDomainNames(cfg *Config) []string {
+	names := make([]string, 0, len(cfg.Domains))
+	for name := range cfg.Domains {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+func isBlockyService(entry Domain) bool {
+	return entry.Type == "service" && entry.Port == 8443 && (entry.IP == "" || entry.IP == "127.0.0.1")
 }
 
 func saveConfig(cfg *Config) error {
@@ -171,14 +221,21 @@ func restoreAppliedConfig() error {
 
 func dnsDomain(cfg *Config) string {
 	if cfg.Settings.DNSDomain != "" {
-		return cfg.Settings.DNSDomain
+		return strings.ToLower(cfg.Settings.DNSDomain)
 	}
-	for d := range cfg.Domains {
-		if strings.HasPrefix(d, "doh.") || strings.HasPrefix(d, "dns.") {
-			return d
+	// Preserve legacy inference only when one actual Blocky endpoint exists.
+	var candidate string
+	for _, domain := range sortedDomainNames(cfg) {
+		name := strings.ToLower(domain)
+		if !isBlockyService(cfg.Domains[domain]) || (!strings.HasPrefix(name, "doh.") && !strings.HasPrefix(name, "dns.")) {
+			continue
 		}
+		if candidate != "" {
+			return ""
+		}
+		candidate = name
 	}
-	return ""
+	return candidate
 }
 
 func certPaths(domain string) (string, string) {

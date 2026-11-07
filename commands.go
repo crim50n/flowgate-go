@@ -32,8 +32,8 @@ func cmdInit() error {
 	fmt.Println("Next steps:")
 	fmt.Println("  flowgate add category-dev")
 	fmt.Println("  flowgate add example.com")
-	fmt.Println("  flowgate service app.example.com 8080")
-	fmt.Println("  flowgate dns dns.example.com")
+	fmt.Println("  flowgate service app.example.net 8080")
+	fmt.Println("  flowgate dns set dns.example.net")
 	fmt.Println("  flowgate status")
 	return nil
 }
@@ -46,8 +46,10 @@ func applyConfig(cfg *Config) error {
 	if err := saveConfig(cfg); err != nil {
 		return err
 	}
-	if err := syncAll(); err != nil {
-		_ = restoreSnapshot(snap)
+	if err := syncAllWithConfigSnapshot(&snap); err != nil {
+		if restoreErr := restoreSnapshot(snap); restoreErr != nil {
+			return fmt.Errorf("%w; restore previous config: %v", err, restoreErr)
+		}
 		return err
 	}
 	return nil
@@ -142,7 +144,11 @@ func cmdService(args []string) error {
 	if err != nil {
 		return err
 	}
-	cfg.Domains[domain] = Domain{Type: "service", IP: ip, Port: port}
+	entry := Domain{Type: "service", IP: ip, Port: port}
+	if dnsDomain(cfg) == domain && !isBlockyService(entry) {
+		return fmt.Errorf("%s is the primary DNS endpoint; choose another DNS hostname or remove it before changing its backend", domain)
+	}
+	cfg.Domains[domain] = entry
 	success("Set service: %s -> %s:%d", domain, ip, port)
 	return applyConfig(cfg)
 }
@@ -170,8 +176,17 @@ func parseServiceIP(args []string) (string, error) {
 }
 
 func cmdDNS(args []string) error {
+	explicitSet := len(args) > 0 && args[0] == "set"
+	if explicitSet {
+		args = args[1:]
+	}
+	replace := false
+	if len(args) == 2 && args[1] == "--replace" {
+		replace = true
+		args = args[:1]
+	}
 	if len(args) != 1 {
-		return fmt.Errorf("dns requires exactly one domain")
+		return fmt.Errorf("dns set requires DOMAIN [--replace]; use flowgate check DOMAIN for read-only diagnostics")
 	}
 	domain := strings.ToLower(args[0])
 	if !validDomain(domain) {
@@ -181,14 +196,39 @@ func cmdDNS(args []string) error {
 	if err != nil {
 		return err
 	}
-	entry := Domain{Type: "service", IP: "127.0.0.1", Port: 8443}
-	if current, exists := cfg.Domains[domain]; !exists || current != entry {
-		info("Configuring reverse-proxy route for %s (Blocky HTTPS port 8443)...", domain)
-		cfg.Domains[domain] = entry
+	current, exists := cfg.Domains[domain]
+	if exists && !isBlockyService(current) && !replace {
+		return fmt.Errorf("%s already has a %s route; use flowgate dns set %s --replace to replace it, or flowgate check %s to inspect it", domain, current.Type, domain, domain)
 	}
+	entry := Domain{Type: "service", IP: "127.0.0.1", Port: 8443}
+	if !exists || replace || current.ManagedBy == "dns" {
+		entry.ManagedBy = "dns"
+	} else {
+		// An existing user-managed Blocky alias must survive later DNS changes.
+		entry = current
+	}
+	previous := cfg.Settings.DNSDomain
+	for _, name := range sortedDomainNames(cfg) {
+		if name != domain && cfg.Domains[name].ManagedBy == "dns" {
+			delete(cfg.Domains, name)
+		}
+	}
+	cfg.Domains[domain] = entry
 	cfg.Settings.DNSDomain = domain
+	if !explicitSet {
+		warn("dns DOMAIN changes configuration; prefer dns set DOMAIN. Use check DOMAIN for read-only diagnostics.")
+	}
+	if previous != "" && previous != domain {
+		if _, kept := cfg.Domains[previous]; kept {
+			info("Preserving existing service %s; use flowgate remove %s if it is no longer needed", previous, previous)
+		}
+	}
+	info("Configuring primary DNS endpoint %s -> 127.0.0.1:8443...", domain)
+	if err := applyConfig(cfg); err != nil {
+		return err
+	}
 	success("Primary DNS domain set to: %s", domain)
-	return applyConfig(cfg)
+	return nil
 }
 
 func cmdRemove(targets []string) error {

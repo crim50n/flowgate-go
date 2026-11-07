@@ -77,7 +77,7 @@ wait_active
 
 blocky_pid=$(wait_stable_blocky_pid)
 for n in 1 2 3 4 5 6; do
-    flowgate service "service-${n}.example.com" "$((8000 + n))" >/tmp/service-${n}.log 2>&1
+    flowgate service "service-${n}.smart-test.invalid" "$((8000 + n))" >/tmp/service-${n}.log 2>&1
     [ "$(pgrep -x blocky | head -n1)" = "$blocky_pid" ] || {
         echo "Blocky restarted after service-only change" >&2
         exit 1
@@ -91,22 +91,52 @@ wait_stable_blocky_pid >/dev/null
 FLOWGATE_INTEGRATION=1 /tmp/flowgate-go.test -test.run \
     '^(TestSmartDNSResponseSemantics|TestSmartDNSTLSPassthrough)$' -test.v
 
-flowgate dns dns.example.com
+flowgate dns set temporary.smart-test.invalid
+flowgate dns set dns.smart-test.invalid
+if grep -Fq -e 'temporary.smart-test.invalid' -e 'acme_temporary_smart_test_invalid' \
+    /etc/flowgate/flowgate.yaml /etc/angie/stream.d/flowgate.conf /etc/angie/http.d/flowgate.conf; then
+    echo 'Previous managed DNS route was retained' >&2
+    exit 1
+fi
+grep -Eq '^[[:space:]]+dns_domain: dns.smart-test.invalid$' /etc/flowgate/flowgate.yaml
+sha256sum /etc/flowgate/flowgate.yaml /var/lib/flowgate/applied.yaml \
+    /etc/angie/angie.conf /etc/angie/stream.d/flowgate.conf \
+    /etc/angie/http.d/flowgate.conf /etc/blocky/config.yml >/tmp/flowgate-readonly.sha256
+flowgate check example.com >/tmp/flowgate-check.log
+flowgate explain app.smart-test.invalid >/tmp/flowgate-explain.log
+grep -Fq 'DNS: A -> 203.0.113.10' /tmp/flowgate-check.log
+grep -Fq 'exact service -> http://127.0.0.1:9000' /tmp/flowgate-explain.log
+sha256sum -c /tmp/flowgate-readonly.sha256
+if flowgate dns set app.smart-test.invalid >/tmp/flowgate-dns-rejected.log 2>&1; then
+    echo 'DNS setup overwrote an existing service without --replace' >&2
+    exit 1
+fi
+grep -F -- '--replace' /tmp/flowgate-dns-rejected.log
+sha256sum -c /tmp/flowgate-readonly.sha256
+if flowgate add smart-test.invalid >/tmp/flowgate-proxy-rejected.log 2>&1; then
+    echo 'Proxy suffix covering service domains was accepted' >&2
+    exit 1
+fi
+grep -F 'covered by proxy suffix' /tmp/flowgate-proxy-rejected.log
+sha256sum -c /tmp/flowgate-readonly.sha256
+wait_active
+
+flowgate dns set dns.smart-test.invalid
 if grep -Eq '^[[:space:]]+https: 8443$' /etc/blocky/config.yml; then
     echo 'Blocky HTTPS enabled before a certificate exists' >&2
     exit 1
 fi
-mkdir -p /var/lib/angie/acme/acme_dns_example_com
-cp /etc/ssl/certs/ssl-cert-snakeoil.pem /var/lib/angie/acme/acme_dns_example_com/certificate.pem
-cp /etc/ssl/private/ssl-cert-snakeoil.key /var/lib/angie/acme/acme_dns_example_com/private.key
+mkdir -p /var/lib/angie/acme/acme_dns_smart_test_invalid
+cp /etc/ssl/certs/ssl-cert-snakeoil.pem /var/lib/angie/acme/acme_dns_smart_test_invalid/certificate.pem
+cp /etc/ssl/private/ssl-cert-snakeoil.key /var/lib/angie/acme/acme_dns_smart_test_invalid/private.key
 blocky_pid=$(wait_stable_blocky_pid)
 flowgate sync
 wait_new_blocky_pid "$blocky_pid" >/dev/null
 wait_active
 grep -Eq '^[[:space:]]+https: 8443$' /etc/blocky/config.yml
 grep -Eq '^[[:space:]]+tls: 853$' /etc/blocky/config.yml
-su-exec blocky test -r /var/lib/angie/acme/acme_dns_example_com/certificate.pem
-su-exec blocky test -r /var/lib/angie/acme/acme_dns_example_com/private.key
+su-exec blocky test -r /var/lib/angie/acme/acme_dns_smart_test_invalid/certificate.pem
+su-exec blocky test -r /var/lib/angie/acme/acme_dns_smart_test_invalid/private.key
 FLOWGATE_INTEGRATION=1 /tmp/flowgate-go.test -test.run '^TestSmartDNSDoTResponseSemantics$' -test.v
 
 flowgate add category-ai-!cn >/tmp/category-ai.log 2>&1
@@ -116,7 +146,7 @@ FLOWGATE_INTEGRATION=1 FLOWGATE_SMARTDNS_DOMAIN=chatgpt.com /tmp/flowgate-go.tes
 
 blocky_pid=$(wait_stable_blocky_pid)
 for n in 7 8 9; do
-    flowgate service "tls-service-${n}.example.com" "$((8000 + n))" >/tmp/tls-service-${n}.log 2>&1
+    flowgate service "tls-service-${n}.smart-test.invalid" "$((8000 + n))" >/tmp/tls-service-${n}.log 2>&1
     [ "$(pgrep -x blocky | head -n1)" = "$blocky_pid" ] || {
         echo "Blocky restarted after TLS service-only change" >&2
         exit 1
@@ -125,8 +155,8 @@ done
 
 blocky_pid=$(wait_stable_blocky_pid)
 FLOWGATE_ROOT=/tmp/renewal-root PROXY_IP=203.0.113.10 flowgate init >/tmp/renewal-init.log 2>&1
-cp /tmp/renewal-root/etc/ssl/certs/ssl-cert-snakeoil.pem /var/lib/angie/acme/acme_dns_example_com/certificate.pem
-cp /tmp/renewal-root/etc/ssl/private/ssl-cert-snakeoil.key /var/lib/angie/acme/acme_dns_example_com/private.key
+cp /tmp/renewal-root/etc/ssl/certs/ssl-cert-snakeoil.pem /var/lib/angie/acme/acme_dns_smart_test_invalid/certificate.pem
+cp /tmp/renewal-root/etc/ssl/private/ssl-cert-snakeoil.key /var/lib/angie/acme/acme_dns_smart_test_invalid/private.key
 flowgate sync >/tmp/renewal-sync.log 2>&1
 renewed_pid=$(wait_new_blocky_pid "$blocky_pid") || {
     echo 'Blocky did not restart after certificate renewal' >&2

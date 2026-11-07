@@ -91,7 +91,7 @@ jobs:
           sleep 2
           blocky_pid=$(docker exec flowgate-integration pgrep -x blocky | head -n1)
           for n in 1 2 3 4 5 6; do
-            docker exec flowgate-integration flowgate service "service-${n}.example.com" "$((8000 + n))"
+            docker exec flowgate-integration flowgate service "service-${n}.smart-test.invalid" "$((8000 + n))"
             test "$(docker exec flowgate-integration pgrep -x blocky | head -n1)" = "$blocky_pid"
           done
       - name: Verify Smart DNS A/NODATA and TLS passthrough
@@ -112,17 +112,56 @@ jobs:
           docker exec -e FLOWGATE_INTEGRATION=1 flowgate-integration \
             /tmp/flowgate-go.test -test.run \
             '^(TestSmartDNSResponseSemantics|TestSmartDNSTLSPassthrough)$' -test.v
+      - name: Verify DNS ownership and read-only diagnostics
+        run: |
+          docker exec flowgate-integration flowgate dns set temporary.smart-test.invalid
+          docker exec flowgate-integration flowgate dns set dns.smart-test.invalid
+          if docker exec flowgate-integration grep -Fq \
+            -e 'temporary.smart-test.invalid' -e 'acme_temporary_smart_test_invalid' \
+            /etc/flowgate/flowgate.yaml /etc/angie/stream.d/flowgate.conf /etc/angie/http.d/flowgate.conf; then
+            echo 'Previous managed DNS route was retained' >&2
+            exit 1
+          fi
+          docker exec flowgate-integration grep -Eq \
+            '^[[:space:]]+dns_domain: dns.smart-test.invalid$' /etc/flowgate/flowgate.yaml
+          docker exec flowgate-integration sha256sum \
+            /etc/flowgate/flowgate.yaml /var/lib/flowgate/applied.yaml \
+            /etc/angie/angie.conf /etc/angie/stream.d/flowgate.conf \
+            /etc/angie/http.d/flowgate.conf /etc/blocky/config.yml >/tmp/flowgate-readonly.sha256
+          docker exec flowgate-integration flowgate check example.com >/tmp/flowgate-check.log
+          docker exec flowgate-integration flowgate explain app.smart-test.invalid >/tmp/flowgate-explain.log
+          grep -Fq 'DNS: A -> 203.0.113.10' /tmp/flowgate-check.log
+          grep -Fq 'exact service -> http://127.0.0.1:9000' /tmp/flowgate-explain.log
+          docker exec -i flowgate-integration sha256sum -c </tmp/flowgate-readonly.sha256
+          if docker exec flowgate-integration flowgate dns set app.smart-test.invalid >/tmp/flowgate-dns-rejected.log 2>&1; then
+            echo 'DNS setup overwrote an existing service without --replace' >&2
+            exit 1
+          fi
+          grep -F -- '--replace' /tmp/flowgate-dns-rejected.log
+          docker exec -i flowgate-integration sha256sum -c </tmp/flowgate-readonly.sha256
+          if docker exec flowgate-integration flowgate add smart-test.invalid >/tmp/flowgate-proxy-rejected.log 2>&1; then
+            echo 'Proxy suffix covering service domains was accepted' >&2
+            exit 1
+          fi
+          grep -F 'covered by proxy suffix' /tmp/flowgate-proxy-rejected.log
+          docker exec -i flowgate-integration sha256sum -c </tmp/flowgate-readonly.sha256
+          status=$(docker exec flowgate-integration flowgate status)
+          active=$(printf '%s\n' "$status" | grep -c 'ACTIVE' || true)
+          if [ "$active" -lt 2 ] || printf '%s\n' "$status" | grep -q 'INACTIVE'; then
+            printf '%s\n' "$status" >&2
+            exit 1
+          fi
       - name: Verify DNS TLS bootstrap
         run: |
-          docker exec flowgate-integration flowgate dns dns.example.com
+          docker exec flowgate-integration flowgate dns set dns.smart-test.invalid
           if docker exec flowgate-integration grep -Eq '^[[:space:]]+https: 8443$' /etc/blocky/config.yml; then
             echo 'Blocky HTTPS enabled before a certificate exists' >&2
             exit 1
           fi
           docker exec flowgate-integration sh -c '
-            mkdir -p /var/lib/angie/acme/acme_dns_example_com &&
-            cp /etc/ssl/certs/ssl-cert-snakeoil.pem /var/lib/angie/acme/acme_dns_example_com/certificate.pem &&
-            cp /etc/ssl/private/ssl-cert-snakeoil.key /var/lib/angie/acme/acme_dns_example_com/private.key'
+            mkdir -p /var/lib/angie/acme/acme_dns_smart_test_invalid &&
+            cp /etc/ssl/certs/ssl-cert-snakeoil.pem /var/lib/angie/acme/acme_dns_smart_test_invalid/certificate.pem &&
+            cp /etc/ssl/private/ssl-cert-snakeoil.key /var/lib/angie/acme/acme_dns_smart_test_invalid/private.key'
           blocky_pid=$(docker exec flowgate-integration pgrep -x blocky | head -n1)
           docker exec flowgate-integration flowgate sync
           new_blocky_pid=""
@@ -137,8 +176,8 @@ jobs:
           test -n "$new_blocky_pid"
           docker exec flowgate-integration grep -Eq '^[[:space:]]+https: 8443$' /etc/blocky/config.yml
           docker exec flowgate-integration grep -Eq '^[[:space:]]+tls: 853$' /etc/blocky/config.yml
-          docker exec flowgate-integration su-exec blocky test -r /var/lib/angie/acme/acme_dns_example_com/certificate.pem
-          docker exec flowgate-integration su-exec blocky test -r /var/lib/angie/acme/acme_dns_example_com/private.key
+          docker exec flowgate-integration su-exec blocky test -r /var/lib/angie/acme/acme_dns_smart_test_invalid/certificate.pem
+          docker exec flowgate-integration su-exec blocky test -r /var/lib/angie/acme/acme_dns_smart_test_invalid/private.key
       - name: Verify Smart DNS over DoT
         run: |
           docker exec -e FLOWGATE_INTEGRATION=1 flowgate-integration \
@@ -165,7 +204,7 @@ jobs:
           sleep 2
           blocky_pid=$(docker exec flowgate-integration pgrep -x blocky | head -n1)
           for n in 7 8 9; do
-            docker exec flowgate-integration flowgate service "tls-service-${n}.example.com" "$((8000 + n))"
+            docker exec flowgate-integration flowgate service "tls-service-${n}.smart-test.invalid" "$((8000 + n))"
             test "$(docker exec flowgate-integration pgrep -x blocky | head -n1)" = "$blocky_pid"
           done
       - name: Verify certificate renewal restarts Blocky once
@@ -174,8 +213,8 @@ jobs:
           docker exec -e FLOWGATE_ROOT=/tmp/renewal-root -e PROXY_IP=203.0.113.10 \
             flowgate-integration flowgate init >/tmp/renewal-init.log
           docker exec flowgate-integration sh -c '
-            cp /tmp/renewal-root/etc/ssl/certs/ssl-cert-snakeoil.pem /var/lib/angie/acme/acme_dns_example_com/certificate.pem &&
-            cp /tmp/renewal-root/etc/ssl/private/ssl-cert-snakeoil.key /var/lib/angie/acme/acme_dns_example_com/private.key'
+            cp /tmp/renewal-root/etc/ssl/certs/ssl-cert-snakeoil.pem /var/lib/angie/acme/acme_dns_smart_test_invalid/certificate.pem &&
+            cp /tmp/renewal-root/etc/ssl/private/ssl-cert-snakeoil.key /var/lib/angie/acme/acme_dns_smart_test_invalid/private.key'
           docker exec flowgate-integration flowgate sync
           renewed_pid=""
           for i in $(seq 1 50); do

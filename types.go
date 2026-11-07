@@ -6,9 +6,10 @@ type Settings struct {
 }
 
 type Domain struct {
-	Type string `yaml:"type"`
-	Port int    `yaml:"port,omitempty"`
-	IP   string `yaml:"ip,omitempty"`
+	Type      string `yaml:"type"`
+	Port      int    `yaml:"port,omitempty"`
+	IP        string `yaml:"ip,omitempty"`
+	ManagedBy string `yaml:"managed_by,omitempty"`
 }
 
 type Config struct {
