@@ -9,7 +9,7 @@ permissions:
   contents: read
 
 env:
-  GO_VERSION: "1.25.13"
+  GO_VERSION: "1.26.10"
   GOVULNCHECK_VERSION: "v1.7.0"
   STATICCHECK_VERSION: "v0.7.0"
   UPX_VERSION: "5.1.1"

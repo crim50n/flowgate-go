@@ -141,7 +141,7 @@ make test-fast         # unit + race + vet + staticcheck + govulncheck
 make test-integration  # Angie + Blocky runtime, rollback, concurrency, TLS and GeoSite
 ```
 
-The GitHub Actions workflow uses Go 1.25.13 and gates release builds on unit tests, the race detector, `go vet`, `staticcheck`, `govulncheck`, and Docker runtime integration. Release binaries are compressed with UPX 5.1.1 and accompanied by SHA-256 checksums.
+The GitHub Actions workflow uses Go 1.26.10 and gates release builds on unit tests, the race detector, `go vet`, `staticcheck`, `govulncheck`, and Docker runtime integration. Docker builds and the reusable test image use the same Go version. The runtime and test environments retain Alpine 3.22 with Angie 1.12.1-r0 and Blocky 0.28.2; the test image copies the pinned Go toolchain from the official Go image. Release binaries are compressed with UPX 5.1.1 and accompanied by SHA-256 checksums.
 
 ## Docker
 

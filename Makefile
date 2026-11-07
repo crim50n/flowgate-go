@@ -11,7 +11,7 @@ BINDIR := $(DESTDIR)$(PREFIX)/bin
 CONFDIR := $(DESTDIR)$(SYSCONFDIR)/flowgate
 
 UPX ?= upx
-TEST_IMAGE ?= flowgate-test:go1.25.13
+TEST_IMAGE ?= flowgate-test:go1.26.10
 TEST_MOD_CACHE ?= flowgate-test-mod-cache
 TEST_BUILD_CACHE ?= flowgate-test-build-cache
 
