@@ -83,6 +83,8 @@ Both commands inspect the existing configuration and local DLC database. They sh
 
 These commands do not initialize configuration, acquire a write lock, download data, query DNS, or restart services. A missing database is an error instead of an apparent direct route. The output describes configuration, not the applied runtime, the client's VPN routing, or application connectivity.
 
+`flowgate status` also reads existing configuration only. An early status probe cannot create configuration or override the `PROXY_IP` and `DNS_DOMAIN` settings used by `flowgate init`.
+
 ### Conflicting routes
 
 Synchronization rejects a proxy or GeoSite suffix that also covers a configured service. For example, proxying `example.com` while serving `app.example.com` would otherwise make Blocky rewrite a service domain that should use authoritative DNS. Remove the overlapping domain or selector before retrying. Service domains remain absent from Blocky's mappings.

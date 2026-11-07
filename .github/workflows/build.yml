@@ -240,6 +240,11 @@ jobs:
           docker logs --tail 100 flowgate-integration || true
           docker exec flowgate-integration angie -T || true
           docker exec flowgate-integration flowgate status || true
+          docker exec flowgate-integration cat /etc/flowgate/flowgate.yaml || true
+          docker exec flowgate-integration cat /etc/blocky/config.yml || true
+          for log in /tmp/flowgate-check.log /tmp/flowgate-explain.log /tmp/flowgate-dns-rejected.log /tmp/flowgate-proxy-rejected.log; do
+            if [ -f "$log" ]; then cat "$log"; fi
+          done
       - name: Cleanup runtime
         if: always()
         run: docker rm -f flowgate-integration >/dev/null 2>&1 || true

@@ -305,7 +305,7 @@ func cmdStatus() error {
 	printStatus("Angie", isActive("angie"))
 	printStatus("Blocky", isActive("blocky"))
 
-	cfg, err := loadConfig()
+	cfg, err := loadExistingConfig()
 	if err != nil {
 		return err
 	}
