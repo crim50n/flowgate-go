@@ -79,6 +79,11 @@ func validateServiceProxyConflicts(cfg *Config, rules []ProxyRule) error {
 }
 
 func renderBlocky(cfg *Config, rules []ProxyRule) ([]byte, error) {
+	if cfg.Settings.DNSDomain == "" {
+		if candidates := inferredDNSDomains(cfg); len(candidates) > 1 {
+			return nil, fmt.Errorf("ambiguous primary DNS hostname (%s); select one with 'flowgate dns set DOMAIN' before syncing", strings.Join(candidates, ", "))
+		}
+	}
 	if err := validateServiceProxyConflicts(cfg, rules); err != nil {
 		return nil, err
 	}

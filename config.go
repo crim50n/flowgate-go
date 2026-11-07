@@ -219,23 +219,26 @@ func restoreAppliedConfig() error {
 	return writeAtomic(p.ConfigFile, data, 0644)
 }
 
+func inferredDNSDomains(cfg *Config) []string {
+	var candidates []string
+	for _, domain := range sortedDomainNames(cfg) {
+		name := strings.ToLower(domain)
+		if isBlockyService(cfg.Domains[domain]) && (strings.HasPrefix(name, "doh.") || strings.HasPrefix(name, "dns.")) {
+			candidates = append(candidates, name)
+		}
+	}
+	return candidates
+}
+
 func dnsDomain(cfg *Config) string {
 	if cfg.Settings.DNSDomain != "" {
 		return strings.ToLower(cfg.Settings.DNSDomain)
 	}
 	// Preserve legacy inference only when one actual Blocky endpoint exists.
-	var candidate string
-	for _, domain := range sortedDomainNames(cfg) {
-		name := strings.ToLower(domain)
-		if !isBlockyService(cfg.Domains[domain]) || (!strings.HasPrefix(name, "doh.") && !strings.HasPrefix(name, "dns.")) {
-			continue
-		}
-		if candidate != "" {
-			return ""
-		}
-		candidate = name
+	if candidates := inferredDNSDomains(cfg); len(candidates) == 1 {
+		return candidates[0]
 	}
-	return candidate
+	return ""
 }
 
 func certPaths(domain string) (string, string) {

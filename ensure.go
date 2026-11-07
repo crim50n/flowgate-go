@@ -84,6 +84,7 @@ error_log /var/log/angie/error.log info;
 events { worker_connections 1024; }
 stream {
     resolver 1.1.1.1 8.8.8.8 ipv6=off;
+    variables_hash_bucket_size 512;
     map_hash_bucket_size 128;
     map_hash_max_size 262144;
     include /etc/angie/stream.d/*.conf;
@@ -289,15 +290,20 @@ func addToContext(text, name, directive string) (string, bool) {
 func enableStreamBlock(text string) string {
 	const include = "include /etc/angie/stream.d/*.conf;"
 	const resolver = "resolver 1.1.1.1 8.8.8.8 ipv6=off;"
+	// HTTP ACME clients also register certificate variables in the stream context.
+	const variablesHash = "variables_hash_bucket_size 512;"
 	if _, _, ok := contextRange(text, "stream"); !ok {
 		if !strings.HasSuffix(text, "\n") {
 			text += "\n"
 		}
-		return text + "\nstream {\n    " + resolver + "\n    map_hash_bucket_size 128;\n    map_hash_max_size 262144;\n    " + include + "\n}\n"
+		return text + "\nstream {\n    " + resolver + "\n    " + variablesHash + "\n    map_hash_bucket_size 128;\n    map_hash_max_size 262144;\n    " + include + "\n}\n"
 	}
 	text, _ = addToContext(text, "stream", include)
 	if !contextHasTopLevelDirective(text, "stream", "resolver") {
 		text, _ = addToContext(text, "stream", resolver)
+	}
+	if !contextHasTopLevelDirective(text, "stream", "variables_hash_bucket_size") {
+		text, _ = addToContext(text, "stream", variablesHash)
 	}
 	if !contextHasTopLevelDirective(text, "stream", "map_hash_bucket_size") {
 		text, _ = addToContext(text, "stream", "map_hash_bucket_size 128;")

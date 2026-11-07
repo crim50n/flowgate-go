@@ -1,6 +1,7 @@
 package main
 
 import (
+	"os"
 	"strings"
 	"testing"
 )
@@ -86,5 +87,64 @@ http { include /etc/angie/http.d/*.conf; }
 	}
 	if strings.Contains(renderAngieStream(testConfig(), testRules(t)), "resolver ") {
 		t.Fatal("generated stream config must not contain resolver")
+	}
+}
+
+func TestEnsureAngieVariableHashForACMEClients(t *testing.T) {
+	cases := []struct {
+		name string
+		main string
+	}{
+		{"new configuration", ""},
+		{"missing stream context", "events {}\nhttp {}\n"},
+		{"existing contexts", "events {}\nstream {}\nhttp {}\n"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("FLOWGATE_ROOT", t.TempDir())
+			p := getPaths()
+			if tc.main != "" {
+				if err := writeAtomic(p.AngieMain, []byte(tc.main), 0644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			for pass := 0; pass < 2; pass++ {
+				if err := ensureAngieConfig(); err != nil {
+					t.Fatal(err)
+				}
+				data, err := os.ReadFile(p.AngieMain)
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, context := range []string{"stream", "http"} {
+					open, end, ok := contextRange(string(data), context)
+					if !ok {
+						t.Fatalf("missing %s context", context)
+					}
+					body := string(data[open:end])
+					if !strings.Contains(body, "variables_hash_bucket_size 512;") {
+						t.Fatalf("%s lacks capacity for service ACME variables on pass %d:\n%s", context, pass, body)
+					}
+					if strings.Count(body, "variables_hash_bucket_size") != 1 {
+						t.Fatalf("%s has duplicate hash directives on pass %d:\n%s", context, pass, body)
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestExistingStreamVariableHashSizeIsPreserved(t *testing.T) {
+	input := "events {}\nstream { variables_hash_bucket_size 1024; }\nhttp {}\n"
+	got := enableStreamBlock(input)
+	got = enableStreamBlock(got)
+	open, end, ok := contextRange(got, "stream")
+	if !ok {
+		t.Fatal("missing stream context")
+	}
+	body := got[open:end]
+	if !strings.Contains(body, "variables_hash_bucket_size 1024;") ||
+		strings.Count(body, "variables_hash_bucket_size") != 1 {
+		t.Fatalf("explicit stream variable hash setting was changed or duplicated:\n%s", body)
 	}
 }

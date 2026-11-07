@@ -234,6 +234,12 @@ jobs:
           docker exec flowgate-integration flowgate sync
           sleep 1
           test "$(docker exec flowgate-integration pgrep -x blocky | head -n1)" = "$renewed_pid"
+      - name: Runtime diagnostics on failure
+        if: failure()
+        run: |
+          docker logs --tail 100 flowgate-integration || true
+          docker exec flowgate-integration angie -T || true
+          docker exec flowgate-integration flowgate status || true
       - name: Cleanup runtime
         if: always()
         run: docker rm -f flowgate-integration >/dev/null 2>&1 || true
