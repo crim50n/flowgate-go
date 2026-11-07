@@ -53,6 +53,11 @@ jobs:
           cache: true
       - name: Build integration test binary
         run: CGO_ENABLED=0 go test -c -o /tmp/flowgate-go.test .
+      - name: Validate reusable Go test image
+        run: |
+          docker build -f Dockerfile.test -t flowgate-test-toolchain .
+          docker run --rm -v "$PWD:/src:ro" -w /src flowgate-test-toolchain \
+            sh -c 'go version && go test -race -count=1 ./...'
       - name: Build and start runtime image
         run: |
           version=dev
